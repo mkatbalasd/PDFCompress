@@ -63,7 +63,14 @@ def _mock_subprocess_run(command, **_: object):
 
 def _mock_subprocess_run_preserve_images(command, **kwargs: object):
     assert "-dDownsampleColorImages=false" in command
-    assert "-dColorImageDownsampleType=/None" in command
+    assert "-dDownsampleGrayImages=false" in command
+    assert "-dDownsampleMonoImages=false" in command
+    assert not any(
+        option.startswith("-dColorImageDownsampleType")
+        or option.startswith("-dGrayImageDownsampleType")
+        or option.startswith("-dMonoImageDownsampleType")
+        for option in command
+    )
     return _mock_subprocess_run(command, **kwargs)
 
 
