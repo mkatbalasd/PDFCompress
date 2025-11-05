@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from flask import (
     Flask,
@@ -68,8 +69,18 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     app.config.setdefault("RATELIMIT_ENABLED", True)
     app.config.setdefault("RATELIMIT_KEY_PREFIX", "pdf-compress")
 
+    env_ghostscript_command = os.environ.get("GHOSTSCRIPT_COMMAND")
+    if env_ghostscript_command:
+        app.config.setdefault("GHOSTSCRIPT_COMMAND", env_ghostscript_command)
+
     if test_config:
         app.config.update(test_config)
+
+    if "GHOSTSCRIPT_COMMAND" not in app.config:
+        app.config["GHOSTSCRIPT_COMMAND"] = _detect_ghostscript_executable()
+
+    if app.config.get("GHOSTSCRIPT_COMMAND") in {"", None}:
+        app.config["GHOSTSCRIPT_COMMAND"] = _detect_ghostscript_executable()
 
     # Ensure directories exist
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
@@ -168,7 +179,22 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                     )
             return response
 
+        ghostscript_binary = app.config.get("GHOSTSCRIPT_COMMAND")
+        if not ghostscript_binary:
+            app.logger.error("Ghostscript executable is not configured or found.")
+            response = jsonify(
+                {
+                    "message": (
+                        "Ghostscript is not available on the server. Please install it "
+                        "and ensure it can be executed."
+                    )
+                }
+            )
+            response.status_code = 503
+            return response
+
         command = _build_ghostscript_command(
+            executable=str(ghostscript_binary),
             input_path=upload_path,
             output_path=output_path,
             preset=COMPRESSION_PRESETS[compression_level],
@@ -257,12 +283,12 @@ def _has_allowed_extension(filename: str) -> bool:
 
 
 def _build_ghostscript_command(
-    *, input_path: Path, output_path: Path, preset: str
+    *, executable: str, input_path: Path, output_path: Path, preset: str
 ) -> list[str]:
     """Construct the Ghostscript command for compression."""
 
     return [
-        "gs",
+        executable,
         "-sDEVICE=pdfwrite",
         "-dCompatibilityLevel=1.4",
         f"-dPDFSETTINGS={preset}",
@@ -283,6 +309,25 @@ def _build_download_name(original_filename: str | None) -> str:
         sanitized = secure_filename(original_filename)
         base_name = Path(sanitized).stem or DEFAULT_DOWNLOAD_NAME
     return f"{base_name}-compressed.pdf"
+
+
+def _detect_ghostscript_executable() -> str | None:
+    """Attempt to locate a Ghostscript executable on the host system."""
+
+    candidates: Iterable[str] = (
+        os.environ.get("GHOSTSCRIPT_COMMAND"),
+        "gs",
+        "gswin64c",
+        "gswin32c",
+    )
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
 
 
 app = create_app()
