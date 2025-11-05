@@ -56,6 +56,12 @@ def _mock_subprocess_run(command, **_: object):
     return Result()
 
 
+def _mock_subprocess_run_preserve_images(command, **kwargs: object):
+    assert "-dDownsampleColorImages=false" in command
+    assert "-dColorImageDownsampleType=/None" in command
+    return _mock_subprocess_run(command, **kwargs)
+
+
 def test_index_route_renders(client):
     response = client.get("/")
     assert response.status_code == 200
@@ -95,6 +101,25 @@ def test_compress_success(client):
     assert response.headers["Content-Disposition"].startswith(
         "attachment; filename=sample-compressed.pdf"
     )
+
+
+def test_compress_with_preserved_images(client):
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 test content")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "compression_level": "medium",
+        "preserve_images": "on",
+    }
+
+    with patch(
+        "app.subprocess.run",
+        side_effect=_mock_subprocess_run_preserve_images,
+    ):
+        response = client.post(
+            "/compress", data=data, content_type="multipart/form-data"
+        )
+
+    assert response.status_code == 200
 
 
 def test_compress_missing_ghostscript_binary(client):

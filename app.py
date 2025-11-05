@@ -189,6 +189,8 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             response.status_code = 400
             return response
 
+        preserve_images = _is_truthy_flag(request.form.get("preserve_images"))
+
         if not _is_pdf(uploaded_file):
             response = jsonify(
                 {"message": "The uploaded file must be a valid PDF document."}
@@ -241,6 +243,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             input_path=upload_path,
             output_path=output_path,
             preset=COMPRESSION_PRESETS[compression_level],
+            preserve_images=preserve_images,
         )
 
         try:
@@ -326,11 +329,16 @@ def _has_allowed_extension(filename: str) -> bool:
 
 
 def _build_ghostscript_command(
-    *, executable: str, input_path: Path, output_path: Path, preset: str
+    *,
+    executable: str,
+    input_path: Path,
+    output_path: Path,
+    preset: str,
+    preserve_images: bool = False,
 ) -> list[str]:
     """Construct the Ghostscript command for compression."""
 
-    return [
+    command = [
         executable,
         "-sDEVICE=pdfwrite",
         "-dCompatibilityLevel=1.4",
@@ -339,8 +347,33 @@ def _build_ghostscript_command(
         "-dQUIET",
         "-dBATCH",
         f"-sOutputFile={output_path}",
-        str(input_path),
     ]
+
+    if preserve_images:
+        command.extend(
+            [
+                "-dDownsampleColorImages=false",
+                "-dDownsampleGrayImages=false",
+                "-dDownsampleMonoImages=false",
+                "-dColorImageDownsampleType=/None",
+                "-dGrayImageDownsampleType=/None",
+                "-dMonoImageDownsampleType=/None",
+            ]
+        )
+
+    command.append(str(input_path))
+
+    return command
+
+
+def _is_truthy_flag(value: str | None) -> bool:
+    """Interpret checkbox-style form values as booleans."""
+
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
 
 
 def _build_download_name(original_filename: str | None) -> str:
