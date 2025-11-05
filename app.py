@@ -64,9 +64,7 @@ else:
 
     else:  # pragma: no cover - executed when Flask-Limiter is installed
         from flask_limiter import Limiter  # type: ignore[import-not-found]
-        from flask_limiter.util import (
-            get_remote_address,
-        )  # type: ignore[import-not-found]
+        from flask_limiter.util import get_remote_address
 
 
 # Directory configuration
@@ -359,9 +357,6 @@ def _build_ghostscript_command(
                 "-dDownsampleColorImages=false",
                 "-dDownsampleGrayImages=false",
                 "-dDownsampleMonoImages=false",
-                "-dColorImageDownsampleType=/None",
-                "-dGrayImageDownsampleType=/None",
-                "-dMonoImageDownsampleType=/None",
             ]
         )
 

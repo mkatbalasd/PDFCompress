@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Improved Ghostscript auto-detection to honour explicit paths and scan typical Windows installation directories, preventing `503` errors when the binary is installed but not on `PATH`.
 - Added a runtime fallback for Flask-Limiter so the app and tests work even when the optional dependency is unavailable.
 - Normalised Ghostscript input and output paths to prevent Windows-specific compression failures caused by backslash escaping.
+- Removed unsupported Ghostscript downsampling type flags so the "preserve images" option no longer crashes compression.
 
 ## [1.1.0] - 2024-06-08
 ### Added
