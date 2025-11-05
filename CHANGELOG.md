@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Added
+- Arabic end-to-end setup guide covering Ghostscript installation and environment preparation.
+- README pointers and expanded installation checklist for Ghostscript and developer tooling.
+
 ## [1.1.0] - 2024-06-08
 ### Added
 - Flask-Limiter integration to enforce configurable rate limits on the `/compress` endpoint with JSON error responses.
