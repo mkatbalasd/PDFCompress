@@ -11,7 +11,12 @@ import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import _detect_ghostscript_executable, create_app, limiter
+from app import (
+    _build_ghostscript_command,
+    _detect_ghostscript_executable,
+    create_app,
+    limiter,
+)
 
 
 @pytest.fixture()
@@ -183,6 +188,23 @@ def test_compress_rate_limit_exceeded(tmp_path: Path):
         responses[-1].get_json()["message"]
         == "Too many requests, please try again later."
     )
+
+
+def test_build_ghostscript_command_normalises_backslashes():
+    input_path = Path(r"C:\Users\Test\input file.pdf")
+    output_path = Path(r"C:\Users\Test\output file.pdf")
+
+    command = _build_ghostscript_command(
+        executable="gs",
+        input_path=input_path,
+        output_path=output_path,
+        preset="/screen",
+        preserve_images=False,
+    )
+
+    output_flag = next(part for part in command if part.startswith("-sOutputFile="))
+    assert output_flag.endswith("C:/Users/Test/output file.pdf")
+    assert command[-1] == "C:/Users/Test/input file.pdf"
 
 
 def test_detect_ghostscript_uses_explicit_path(monkeypatch, tmp_path: Path):
