@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, TypeVar, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, TypeVar
 
 from flask import (
     Flask,
@@ -21,6 +21,9 @@ from flask import (
     request,
     send_from_directory,
 )
+from werkzeug.datastructures import FileStorage
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
+from werkzeug.utils import secure_filename
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -61,12 +64,10 @@ else:
 
     else:  # pragma: no cover - executed when Flask-Limiter is installed
         from flask_limiter import Limiter  # type: ignore[import-not-found]
-        from flask_limiter.util import get_remote_address  # type: ignore[import-not-found]
+        from flask_limiter.util import (
+            get_remote_address,
+        )  # type: ignore[import-not-found]
 
-
-from werkzeug.datastructures import FileStorage
-from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
-from werkzeug.utils import secure_filename
 
 # Directory configuration
 BASE_DIR = Path(__file__).resolve().parent
@@ -338,6 +339,9 @@ def _build_ghostscript_command(
 ) -> list[str]:
     """Construct the Ghostscript command for compression."""
 
+    normalized_input = _normalize_path_for_ghostscript(input_path)
+    normalized_output = _normalize_path_for_ghostscript(output_path)
+
     command = [
         executable,
         "-sDEVICE=pdfwrite",
@@ -346,7 +350,7 @@ def _build_ghostscript_command(
         "-dNOPAUSE",
         "-dQUIET",
         "-dBATCH",
-        f"-sOutputFile={output_path}",
+        f"-sOutputFile={normalized_output}",
     ]
 
     if preserve_images:
@@ -361,7 +365,7 @@ def _build_ghostscript_command(
             ]
         )
 
-    command.append(str(input_path))
+    command.append(normalized_input)
 
     return command
 
@@ -385,6 +389,12 @@ def _build_download_name(original_filename: str | None) -> str:
         sanitized = secure_filename(original_filename)
         base_name = Path(sanitized).stem or DEFAULT_DOWNLOAD_NAME
     return f"{base_name}-compressed.pdf"
+
+
+def _normalize_path_for_ghostscript(path: Path) -> str:
+    """Convert filesystem paths into a form reliably understood by Ghostscript."""
+
+    return os.fspath(path).replace("\\", "/")
 
 
 def _detect_ghostscript_executable() -> str | None:
