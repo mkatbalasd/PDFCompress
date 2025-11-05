@@ -15,6 +15,8 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
 
 - Python 3.10+
 - [Ghostscript](https://ghostscript.com/) installed and available on the system `PATH`
+  - The application auto-detects common executables (`gs`, `gswin64c`, `gswin32c`).
+  - Override the detection with the `GHOSTSCRIPT_COMMAND` environment variable if Ghostscript is installed in a custom location.
 
 ## Installation
 
@@ -63,6 +65,7 @@ Tests mock Ghostscript so they run quickly without needing the binary. Coverage 
 - `MAX_CONTENT_LENGTH` – defaults to 20 MiB and prevents oversized uploads.
 - `COMPRESS_RATE_LIMIT` – defaults to `10 per minute` and controls how many compression requests a single client can make.
 - `RATELIMIT_STORAGE_URI` – defaults to in-memory storage; point this to Redis or Memcached in production.
+- `GHOSTSCRIPT_COMMAND` – set to an explicit executable path when automatic detection cannot find Ghostscript.
 - Security headers are applied automatically (`CSP`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`).
 
 ## Continuous Integration

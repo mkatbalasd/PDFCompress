@@ -11,7 +11,7 @@ import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import create_app
+from app import create_app, limiter
 
 
 @pytest.fixture()
@@ -22,40 +22,25 @@ def client(tmp_path: Path) -> Generator:
             "UPLOAD_FOLDER": str(tmp_path / "uploads"),
             "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
             "RATELIMIT_ENABLED": False,
+            "RATELIMIT_STORAGE_URI": f"memory://?unique={uuid4().hex}",
         }
     )
+
+    app.config["GHOSTSCRIPT_COMMAND"] = "gs"
 
     uploads = Path(app.config["UPLOAD_FOLDER"])
     compressed = Path(app.config["COMPRESSED_FOLDER"])
     uploads.mkdir(parents=True, exist_ok=True)
     compressed.mkdir(parents=True, exist_ok=True)
 
-    with app.test_client() as client:
-        yield client
-
-
-@pytest.fixture()
-def rate_limited_client(tmp_path: Path) -> Generator:
-    app = create_app(
-        {
-            "TESTING": True,
-            "UPLOAD_FOLDER": str(tmp_path / "uploads"),
-            "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
-            "COMPRESS_RATE_LIMIT": "2 per minute",
-            "RATELIMIT_KEY_PREFIX": f"test-{uuid4().hex}",
-        }
-    )
-
-    uploads = Path(app.config["UPLOAD_FOLDER"])
-    compressed = Path(app.config["COMPRESSED_FOLDER"])
-    uploads.mkdir(parents=True, exist_ok=True)
-    compressed.mkdir(parents=True, exist_ok=True)
+    limiter.reset()
 
     with app.test_client() as client:
         yield client
 
 
 def _mock_subprocess_run(command, **_: object):
+    assert command[0] == "gs"
     output_flag = next(
         (part for part in command if str(part).startswith("-sOutputFile=")),
         None,
@@ -112,28 +97,64 @@ def test_compress_success(client):
     )
 
 
-def test_compress_rate_limit_exceeded(rate_limited_client):
+def test_compress_missing_ghostscript_binary(client):
+    client.application.config["GHOSTSCRIPT_COMMAND"] = None
+
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 test content")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "compression_level": "medium",
+    }
+
+    response = client.post("/compress", data=data, content_type="multipart/form-data")
+
+    assert response.status_code == 503
+    assert response.is_json
+    assert (
+        response.get_json()["message"]
+        == "Ghostscript is not available on the server. Please install it and ensure it can be executed."
+    )
+
+
+def test_compress_rate_limit_exceeded(tmp_path: Path):
     def build_form() -> dict[str, tuple[io.BytesIO, str] | str]:
         return {
             "file": (io.BytesIO(b"%PDF-1.4 test content"), "sample.pdf"),
             "compression_level": "medium",
         }
 
-    with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
-        first = rate_limited_client.post(
-            "/compress", data=build_form(), content_type="multipart/form-data"
-        )
-        assert first.status_code == 200
+    app = create_app(
+        {
+            "TESTING": True,
+            "UPLOAD_FOLDER": str(tmp_path / "uploads"),
+            "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
+            "COMPRESS_RATE_LIMIT": "2 per minute",
+            "RATELIMIT_KEY_PREFIX": f"test-{uuid4().hex}",
+            "RATELIMIT_STORAGE_URI": f"memory://?unique={uuid4().hex}",
+        }
+    )
+    app.config["GHOSTSCRIPT_COMMAND"] = "gs"
 
-        second = rate_limited_client.post(
-            "/compress", data=build_form(), content_type="multipart/form-data"
-        )
-        assert second.status_code == 200
+    uploads = Path(app.config["UPLOAD_FOLDER"])
+    compressed = Path(app.config["COMPRESSED_FOLDER"])
+    uploads.mkdir(parents=True, exist_ok=True)
+    compressed.mkdir(parents=True, exist_ok=True)
 
-        third = rate_limited_client.post(
-            "/compress", data=build_form(), content_type="multipart/form-data"
-        )
+    limiter.reset()
 
-    assert third.status_code == 429
-    assert third.is_json
-    assert third.get_json()["message"] == "Too many requests, please try again later."
+    with app.test_client() as client:
+        with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
+            responses = [
+                client.post(
+                    "/compress", data=build_form(), content_type="multipart/form-data"
+                )
+                for _ in range(3)
+            ]
+
+    assert responses[0].status_code == 200
+    assert responses[-1].status_code == 429
+    assert responses[-1].is_json
+    assert (
+        responses[-1].get_json()["message"]
+        == "Too many requests, please try again later."
+    )
