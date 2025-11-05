@@ -18,19 +18,46 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
   - The application auto-detects common executables (`gs`, `gswin64c`, `gswin32c`).
   - Override the detection with the `GHOSTSCRIPT_COMMAND` environment variable if Ghostscript is installed in a custom location.
 
+## Documentation
+
+- 🇸🇦 **دليل الإعداد الشامل باللغة العربية:** راجع [docs/SETUP_AR.md](docs/SETUP_AR.md) للحصول على شرحٍ خطوة بخطوة يشمل تثبيت Ghostscript، تجهيز البيئة الافتراضية، تنفيذ الاختبارات، ومتطلبات النشر.
+
 ## Installation
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows use `.venv\\Scripts\\activate`
-pip install -r requirements.txt
-```
+1. Create and activate a virtual environment:
 
-Ghostscript installation differs by platform:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows use `.venv\\Scripts\\activate`
+   ```
 
-- **macOS (Homebrew):** `brew install ghostscript`
-- **Ubuntu/Debian:** `sudo apt-get install ghostscript`
-- **Windows:** Download the installer from the [Ghostscript website](https://ghostscript.com/releases/gsdnld.html) and follow the prompts.
+2. Upgrade `pip` and install the Python dependencies:
+
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. Install Ghostscript for PDF compression. Common options:
+
+   - **macOS (Homebrew):** `brew install ghostscript`
+   - **Ubuntu/Debian:** `sudo apt-get install ghostscript`
+   - **Fedora/RHEL/CentOS:** `sudo dnf install ghostscript`
+   - **Windows:** Download the installer from the [Ghostscript website](https://ghostscript.com/releases/gsdnld.html) and select the *Add to PATH* option during setup.
+
+4. Verify the CLI is available:
+
+   ```bash
+   gs --version
+   ```
+
+   On Windows the executable may be named `gswin64c` or `gswin32c`. Override the detection if necessary by exporting `GHOSTSCRIPT_COMMAND=/path/to/ghostscript`.
+
+5. (Optional) Install developer tooling:
+
+   ```bash
+   pip install -r requirements-dev.txt
+   ```
 
 ## Running the Application
 
