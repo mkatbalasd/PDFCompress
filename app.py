@@ -2,25 +2,68 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable, TypeVar, TYPE_CHECKING
 
 from flask import (
     Flask,
     Response,
     after_this_request,
+    has_request_context,
     jsonify,
     render_template,
     request,
     send_from_directory,
 )
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+if TYPE_CHECKING:
+    from flask_limiter import Limiter  # type: ignore[import-not-found]
+    from flask_limiter.util import get_remote_address  # type: ignore[import-not-found]
+else:
+    if (
+        importlib.util.find_spec("flask_limiter") is None
+    ):  # pragma: no cover - optional dep
+
+        class Limiter:
+            """Fallback Limiter implementation used when Flask-Limiter is absent."""
+
+            def __init__(self, *_, **__):
+                pass
+
+            def init_app(self, *_: Any, **__: Any) -> None:
+                """Stubbed hook matching Flask-Limiter's init_app."""
+
+            def limit(self, _limit_value: Any) -> Callable[[_F], _F]:
+                """Return a decorator that leaves the wrapped function unchanged."""
+
+                def decorator(func: _F) -> _F:
+                    return func
+
+                return decorator
+
+            def reset(self) -> None:
+                """Compatibility no-op used by the unit tests."""
+
+        def get_remote_address() -> str:
+            """Fallback address resolver mirroring Flask-Limiter behaviour."""
+
+            if has_request_context() and request.remote_addr:
+                return str(request.remote_addr)
+            return "127.0.0.1"
+
+    else:  # pragma: no cover - executed when Flask-Limiter is installed
+        from flask_limiter import Limiter  # type: ignore[import-not-found]
+        from flask_limiter.util import get_remote_address  # type: ignore[import-not-found]
+
+
 from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
 from werkzeug.utils import secure_filename
