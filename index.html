@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDFCompress</title>
+    <style>
+        :root {
+            --primary-color: #007bff;
+            --secondary-color: #6c757d;
+            --success-color: #28a745;
+            --danger-color: #dc3545;
+            --light-color: #f8f9fa;
+            --dark-color: #343a40;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        body {
+            font-family: var(--font-family);
+            background-color: var(--light-color);
+            color: var(--dark-color);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        main {
+            background-color: white;
+            padding: 2rem 3rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+        }
+        h1 {
+            color: var(--dark-color);
+            margin-bottom: 0.5rem;
+        }
+        p {
+            color: var(--secondary-color);
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+        }
+        #upload-form {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        .form-group {
+            text-align: left;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        input[type="file"], select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+        input[type="file"]::file-selector-button {
+            margin-right: 1rem;
+            border: none;
+            background: var(--primary-color);
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        input[type="file"]::file-selector-button:hover {
+            background: #0056b3;
+        }
+        button {
+            padding: 0.75rem 1.5rem;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: white;
+            background-color: var(--primary-color);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+        button:disabled {
+            background-color: var(--secondary-color);
+            cursor: not-allowed;
+        }
+        button:not(:disabled):hover {
+            background-color: #0056b3;
+        }
+        #status {
+            margin-top: 1.5rem;
+            min-height: 1.2em;
+            font-weight: 500;
+        }
+        .status-info { color: var(--primary-color); }
+        .status-success { color: var(--success-color); }
+        .status-error { color: var(--danger-color); }
+
+        .loader {
+            width: 18px;
+            height: 18px;
+            border: 2px solid #FFF;
+            border-bottom-color: transparent;
+            border-radius: 50%;
+            display: inline-block;
+            box-sizing: border-box;
+            animation: rotation 1s linear infinite;
+        }
+        @keyframes rotation {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>PDFCompress</h1>
+        <p>Quickly reduce the file size of your PDF documents. Choose a file, select a compression level, and download your optimized PDF.</p>
+        <form id="upload-form" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="pdf-file">Choose a PDF file:</label>
+                <input type="file" id="pdf-file" name="file" accept=".pdf" required>
+            </div>
+            <div class="form-group">
+                <label for="compression-level">Select Compression Level:</label>
+                <select id="compression-level" name="compression_level">
+                    <option value="low">Low (Printer Quality)</option>
+                    <option value="medium" selected>Medium (eBook Quality)</option>
+                    <option value="high">High (Screen Quality)</option>
+                </select>
+            </div>
+            <button type="submit" id="submit-button">
+                <span>Compress PDF</span>
+            </button>
+        </form>
+        <div id="status"></div>
+    </main>
+    <script type="module" src="/index.tsx"></script>
+</body>
+</html>
