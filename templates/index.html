@@ -36,6 +36,20 @@
             <option value="high">High (smallest file)</option>
           </select>
         </div>
+        <div class="form-field checkbox-field">
+          <label class="checkbox" for="preserve-images">
+            <input
+              type="checkbox"
+              id="preserve-images"
+              name="preserve_images"
+            />
+            <span>Preserve original image quality</span>
+          </label>
+          <p class="help-text">
+            Skip image downsampling for documents where diagrams or photos must
+            stay crystal clear.
+          </p>
+        </div>
         <button type="submit" class="button">Compress PDF</button>
       </form>
       <div id="status" role="status" aria-live="polite"></div>

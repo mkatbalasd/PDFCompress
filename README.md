@@ -6,6 +6,7 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
 
 - 🔒 **Secure file handling** – temporary files receive random names and are deleted immediately after download.
 - ⚙️ **Ghostscript-powered compression** – choose between low, medium, or high compression levels.
+- 🖼️ **Optional image preservation** – keep original image quality when clarity is more important than file size.
 - 🧭 **Simple UX** – clean interface with real-time status updates and automatic downloads.
 - 🧪 **Tested endpoints** – pytest-based coverage for core behaviours.
 - 🛡️ **Built-in rate limiting** – protects the compression endpoint from abusive traffic.

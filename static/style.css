@@ -46,6 +46,28 @@ body {
   gap: 0.5rem;
 }
 
+.checkbox-field {
+  gap: 0.25rem;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 600;
+}
+
+.checkbox input[type="checkbox"] {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.help-text {
+  margin: 0;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
 label {
   font-weight: 600;
 }
