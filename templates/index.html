@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDF Compression Tool</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="container" aria-labelledby="page-title">
+      <h1 id="page-title">Compress your PDF in seconds</h1>
+      <p class="lead">
+        Upload a PDF, choose how much to compress it, and download the optimized
+        version securely.
+      </p>
+      <noscript>
+        JavaScript is required to use this application. Please enable JavaScript
+        and reload the page.
+      </noscript>
+      <form id="compress-form" class="card" aria-describedby="status-message">
+        <div class="form-field">
+          <label for="pdf-file">PDF file</label>
+          <input
+            type="file"
+            id="pdf-file"
+            name="file"
+            accept="application/pdf"
+            required
+          />
+        </div>
+        <div class="form-field">
+          <label for="compression-level">Compression level</label>
+          <select id="compression-level" name="compression_level" required>
+            <option value="low">Low (largest file, best quality)</option>
+            <option value="medium" selected>Medium (balanced)</option>
+            <option value="high">High (smallest file)</option>
+          </select>
+        </div>
+        <button type="submit" class="button">Compress PDF</button>
+      </form>
+      <div id="status" role="status" aria-live="polite"></div>
+    </main>
+    <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+  </body>
+</html>

@@ -1,5 +1,0 @@
-{
-  "description": "A tool to compress PDF files to reduce their size.",
-  "requestFramePermissions": [],
-  "name": "PDFCompress"
-}

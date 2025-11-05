@@ -1,0 +1,258 @@
+"""Flask application that exposes an endpoint for compressing PDF files."""
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import uuid
+from pathlib import Path
+from typing import Any, Dict
+
+from flask import (
+    Flask,
+    Response,
+    after_this_request,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+)
+from werkzeug.datastructures import FileStorage
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
+from werkzeug.utils import secure_filename
+
+# Directory configuration
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_FOLDER = BASE_DIR / "uploads"
+COMPRESSED_FOLDER = BASE_DIR / "compressed"
+
+# Compression level to Ghostscript preset mapping
+COMPRESSION_PRESETS: Dict[str, str] = {
+    "low": "/printer",
+    "medium": "/ebook",
+    "high": "/screen",
+}
+
+ALLOWED_EXTENSIONS = {"pdf"}
+DEFAULT_DOWNLOAD_NAME = "document"
+MAX_CONTENT_LENGTH_BYTES = 20 * 1024 * 1024  # 20 MiB
+
+
+def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
+    """Application factory used by tests and the production server."""
+
+    app = Flask(__name__)
+    app.config.update(
+        UPLOAD_FOLDER=str(UPLOAD_FOLDER),
+        COMPRESSED_FOLDER=str(COMPRESSED_FOLDER),
+        MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH_BYTES,
+    )
+
+    if test_config:
+        app.config.update(test_config)
+
+    # Ensure directories exist
+    Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
+    Path(app.config["COMPRESSED_FOLDER"]).mkdir(parents=True, exist_ok=True)
+
+    _configure_logging(app)
+
+    @app.after_request
+    def set_security_headers(response: Response) -> Response:
+        """Add basic security headers to every response."""
+
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'",
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def handle_file_too_large(_: RequestEntityTooLarge) -> Response:
+        return (
+            jsonify({"message": "The uploaded file exceeds the 20 MiB limit."}),
+            413,
+        )
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(error: HTTPException) -> Response:
+        """Return JSON for HTTP errors triggered inside the API."""
+
+        return jsonify({"message": error.description}), error.code
+
+    @app.route("/", methods=["GET"])
+    def index() -> str:
+        """Render the upload page."""
+
+        return render_template("index.html")
+
+    @app.route("/compress", methods=["POST"])
+    def compress() -> Response:
+        """Compress an uploaded PDF using Ghostscript and return the result."""
+
+        uploaded_file = _extract_file(request.files)
+        if uploaded_file is None:
+            return jsonify({"message": "No PDF file was provided."}), 400
+
+        compression_level = request.form.get("compression_level", "medium").lower()
+        if compression_level not in COMPRESSION_PRESETS:
+            return (
+                jsonify({"message": "Invalid compression level supplied."}),
+                400,
+            )
+
+        if not _is_pdf(uploaded_file):
+            return (
+                jsonify({"message": "The uploaded file must be a valid PDF document."}),
+                400,
+            )
+
+        unique_input_name = f"{uuid.uuid4().hex}.pdf"
+        unique_output_name = f"{uuid.uuid4().hex}.pdf"
+        upload_path = Path(app.config["UPLOAD_FOLDER"]) / unique_input_name
+        output_path = Path(app.config["COMPRESSED_FOLDER"]) / unique_output_name
+
+        try:
+            uploaded_file.save(upload_path)
+        except OSError as error:
+            app.logger.error("Failed to save uploaded file: %s", error)
+            return jsonify({"message": "Failed to save the uploaded file."}), 500
+
+        @after_this_request
+        def cleanup(response: Response) -> Response:
+            """Ensure temporary files are deleted after the response is sent."""
+
+            for path in (upload_path, output_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    app.logger.warning(
+                        "Could not remove temporary file %s: %s", path, cleanup_error
+                    )
+            return response
+
+        command = _build_ghostscript_command(
+            input_path=upload_path,
+            output_path=output_path,
+            preset=COMPRESSION_PRESETS[compression_level],
+        )
+
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            app.logger.exception("Ghostscript executable not found.")
+            return (
+                jsonify({
+                    "message": "Ghostscript is not installed on the server."
+                }),
+                500,
+            )
+        except subprocess.CalledProcessError as error:
+            app.logger.error(
+                "Ghostscript failed with exit code %s: %s",
+                error.returncode,
+                error.stderr,
+            )
+            return (
+                jsonify({
+                    "message": "Ghostscript failed while compressing the file."
+                }),
+                500,
+            )
+
+        download_name = _build_download_name(uploaded_file.filename)
+        return send_from_directory(
+            directory=output_path.parent,
+            path=output_path.name,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/pdf",
+        )
+
+    return app
+
+
+def _configure_logging(app: Flask) -> None:
+    """Configure basic logging for the application."""
+
+    if not app.logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+
+
+def _extract_file(files: Any) -> FileStorage | None:
+    """Extract the uploaded file from request.files in a typed fashion."""
+
+    if "file" not in files:
+        return None
+
+    uploaded_file = files["file"]
+    if isinstance(uploaded_file, FileStorage) and uploaded_file.filename:
+        return uploaded_file
+    return None
+
+
+def _is_pdf(uploaded_file: FileStorage) -> bool:
+    """Perform a lightweight validation to ensure the file is a PDF."""
+
+    filename = uploaded_file.filename or ""
+    if not filename or not _has_allowed_extension(filename):
+        return False
+
+    mimetype = (uploaded_file.mimetype or "").lower()
+    if "pdf" not in mimetype:
+        return False
+
+    position = uploaded_file.stream.tell()
+    uploaded_file.stream.seek(0)
+    header = uploaded_file.stream.read(5)
+    uploaded_file.stream.seek(position)
+    return header == b"%PDF-"
+
+
+def _has_allowed_extension(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _build_ghostscript_command(*, input_path: Path, output_path: Path, preset: str) -> list[str]:
+    """Construct the Ghostscript command for compression."""
+
+    return [
+        "gs",
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.4",
+        f"-dPDFSETTINGS={preset}",
+        "-dNOPAUSE",
+        "-dQUIET",
+        "-dBATCH",
+        f"-sOutputFile={output_path}",
+        str(input_path),
+    ]
+
+
+def _build_download_name(original_filename: str | None) -> str:
+    """Generate a safe, user-friendly name for the compressed file."""
+
+    if not original_filename:
+        base_name = DEFAULT_DOWNLOAD_NAME
+    else:
+        sanitized = secure_filename(original_filename)
+        base_name = Path(sanitized).stem or DEFAULT_DOWNLOAD_NAME
+    return f"{base_name}-compressed.pdf"
+
+
+app = create_app()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
