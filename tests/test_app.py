@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
@@ -20,6 +21,28 @@ def client(tmp_path: Path) -> Generator:
             "TESTING": True,
             "UPLOAD_FOLDER": str(tmp_path / "uploads"),
             "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
+            "RATELIMIT_ENABLED": False,
+        }
+    )
+
+    uploads = Path(app.config["UPLOAD_FOLDER"])
+    compressed = Path(app.config["COMPRESSED_FOLDER"])
+    uploads.mkdir(parents=True, exist_ok=True)
+    compressed.mkdir(parents=True, exist_ok=True)
+
+    with app.test_client() as client:
+        yield client
+
+
+@pytest.fixture()
+def rate_limited_client(tmp_path: Path) -> Generator:
+    app = create_app(
+        {
+            "TESTING": True,
+            "UPLOAD_FOLDER": str(tmp_path / "uploads"),
+            "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
+            "COMPRESS_RATE_LIMIT": "2 per minute",
+            "RATELIMIT_KEY_PREFIX": f"test-{uuid4().hex}",
         }
     )
 
@@ -78,10 +101,39 @@ def test_compress_success(client):
         "compression_level": "medium",
     }
     with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
-        response = client.post("/compress", data=data, content_type="multipart/form-data")
+        response = client.post(
+            "/compress", data=data, content_type="multipart/form-data"
+        )
 
     assert response.status_code == 200
     assert response.headers["Content-Type"].startswith("application/pdf")
     assert response.headers["Content-Disposition"].startswith(
         "attachment; filename=sample-compressed.pdf"
     )
+
+
+def test_compress_rate_limit_exceeded(rate_limited_client):
+    def build_form() -> dict[str, tuple[io.BytesIO, str] | str]:
+        return {
+            "file": (io.BytesIO(b"%PDF-1.4 test content"), "sample.pdf"),
+            "compression_level": "medium",
+        }
+
+    with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
+        first = rate_limited_client.post(
+            "/compress", data=build_form(), content_type="multipart/form-data"
+        )
+        assert first.status_code == 200
+
+        second = rate_limited_client.post(
+            "/compress", data=build_form(), content_type="multipart/form-data"
+        )
+        assert second.status_code == 200
+
+        third = rate_limited_client.post(
+            "/compress", data=build_form(), content_type="multipart/form-data"
+        )
+
+    assert third.status_code == 429
+    assert third.is_json
+    assert third.get_json()["message"] == "Too many requests, please try again later."
