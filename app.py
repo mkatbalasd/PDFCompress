@@ -314,19 +314,37 @@ def _build_download_name(original_filename: str | None) -> str:
 def _detect_ghostscript_executable() -> str | None:
     """Attempt to locate a Ghostscript executable on the host system."""
 
-    candidates: Iterable[str] = (
-        os.environ.get("GHOSTSCRIPT_COMMAND"),
-        "gs",
-        "gswin64c",
-        "gswin32c",
-    )
+    env_candidate = os.environ.get("GHOSTSCRIPT_COMMAND")
+    if env_candidate:
+        resolved_env = shutil.which(env_candidate)
+        if resolved_env:
+            return resolved_env
+        candidate_path = Path(env_candidate)
+        if candidate_path.exists():
+            return str(candidate_path)
 
-    for candidate in candidates:
-        if not candidate:
-            continue
+    for candidate in ("gs", "gswin64c", "gswin32c"):
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
+
+    windows_roots: Iterable[str | None] = (
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("LOCALAPPDATA"),
+    )
+    for root in windows_roots:
+        if not root:
+            continue
+        base_path = Path(root)
+        if not base_path.exists():
+            continue
+        for candidate_dir in base_path.glob("gs/gs*/bin"):
+            for executable_name in ("gswin64c.exe", "gswin32c.exe", "gs.exe"):
+                candidate_path = candidate_dir / executable_name
+                if candidate_path.exists():
+                    return str(candidate_path)
+
     return None
 
 
