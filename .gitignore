@@ -8,3 +8,5 @@ uploads/*
 compressed/*
 !compressed/.gitkeep
 .venv/
+.coverage
+node_modules/

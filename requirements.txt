@@ -1,1 +1,2 @@
 Flask>=2.3,<3.0
+Flask-Limiter>=3.5,<4.0

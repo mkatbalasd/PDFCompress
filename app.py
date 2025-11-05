@@ -1,4 +1,5 @@
 """Flask application that exposes an endpoint for compressing PDF files."""
+
 from __future__ import annotations
 
 import logging
@@ -17,8 +18,10 @@ from flask import (
     request,
     send_from_directory,
 )
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.datastructures import FileStorage
-from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
 from werkzeug.utils import secure_filename
 
 # Directory configuration
@@ -38,6 +41,12 @@ DEFAULT_DOWNLOAD_NAME = "document"
 MAX_CONTENT_LENGTH_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[],
+)
+
+
 def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     """Application factory used by tests and the production server."""
 
@@ -48,12 +57,25 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH_BYTES,
     )
 
+    app.config.setdefault(
+        "COMPRESS_RATE_LIMIT",
+        os.environ.get("COMPRESS_RATE_LIMIT", "10 per minute"),
+    )
+    app.config.setdefault(
+        "RATELIMIT_STORAGE_URI",
+        os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+    )
+    app.config.setdefault("RATELIMIT_ENABLED", True)
+    app.config.setdefault("RATELIMIT_KEY_PREFIX", "pdf-compress")
+
     if test_config:
         app.config.update(test_config)
 
     # Ensure directories exist
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
     Path(app.config["COMPRESSED_FOLDER"]).mkdir(parents=True, exist_ok=True)
+
+    limiter.init_app(app)
 
     _configure_logging(app)
 
@@ -72,16 +94,23 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
 
     @app.errorhandler(RequestEntityTooLarge)
     def handle_file_too_large(_: RequestEntityTooLarge) -> Response:
-        return (
-            jsonify({"message": "The uploaded file exceeds the 20 MiB limit."}),
-            413,
-        )
+        response = jsonify({"message": "The uploaded file exceeds the 20 MiB limit."})
+        response.status_code = 413
+        return response
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(error: HTTPException) -> Response:
         """Return JSON for HTTP errors triggered inside the API."""
 
-        return jsonify({"message": error.description}), error.code
+        response = jsonify({"message": error.description})
+        response.status_code = error.code or 500
+        return response
+
+    @app.errorhandler(TooManyRequests)
+    def handle_rate_limit(_: TooManyRequests) -> Response:
+        response = jsonify({"message": "Too many requests, please try again later."})
+        response.status_code = 429
+        return response
 
     @app.route("/", methods=["GET"])
     def index() -> str:
@@ -90,25 +119,28 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         return render_template("index.html")
 
     @app.route("/compress", methods=["POST"])
+    @limiter.limit(lambda: app.config.get("COMPRESS_RATE_LIMIT", "10 per minute"))
     def compress() -> Response:
         """Compress an uploaded PDF using Ghostscript and return the result."""
 
         uploaded_file = _extract_file(request.files)
         if uploaded_file is None:
-            return jsonify({"message": "No PDF file was provided."}), 400
+            response = jsonify({"message": "No PDF file was provided."})
+            response.status_code = 400
+            return response
 
         compression_level = request.form.get("compression_level", "medium").lower()
         if compression_level not in COMPRESSION_PRESETS:
-            return (
-                jsonify({"message": "Invalid compression level supplied."}),
-                400,
-            )
+            response = jsonify({"message": "Invalid compression level supplied."})
+            response.status_code = 400
+            return response
 
         if not _is_pdf(uploaded_file):
-            return (
-                jsonify({"message": "The uploaded file must be a valid PDF document."}),
-                400,
+            response = jsonify(
+                {"message": "The uploaded file must be a valid PDF document."}
             )
+            response.status_code = 400
+            return response
 
         unique_input_name = f"{uuid.uuid4().hex}.pdf"
         unique_output_name = f"{uuid.uuid4().hex}.pdf"
@@ -119,7 +151,9 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             uploaded_file.save(upload_path)
         except OSError as error:
             app.logger.error("Failed to save uploaded file: %s", error)
-            return jsonify({"message": "Failed to save the uploaded file."}), 500
+            response = jsonify({"message": "Failed to save the uploaded file."})
+            response.status_code = 500
+            return response
 
         @after_this_request
         def cleanup(response: Response) -> Response:
@@ -149,24 +183,22 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             )
         except FileNotFoundError:
             app.logger.exception("Ghostscript executable not found.")
-            return (
-                jsonify({
-                    "message": "Ghostscript is not installed on the server."
-                }),
-                500,
+            response = jsonify(
+                {"message": "Ghostscript is not installed on the server."}
             )
+            response.status_code = 500
+            return response
         except subprocess.CalledProcessError as error:
             app.logger.error(
                 "Ghostscript failed with exit code %s: %s",
                 error.returncode,
                 error.stderr,
             )
-            return (
-                jsonify({
-                    "message": "Ghostscript failed while compressing the file."
-                }),
-                500,
+            response = jsonify(
+                {"message": "Ghostscript failed while compressing the file."}
             )
+            response.status_code = 500
+            return response
 
         download_name = _build_download_name(uploaded_file.filename)
         return send_from_directory(
@@ -224,7 +256,9 @@ def _has_allowed_extension(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def _build_ghostscript_command(*, input_path: Path, output_path: Path, preset: str) -> list[str]:
+def _build_ghostscript_command(
+    *, input_path: Path, output_path: Path, preset: str
+) -> list[str]:
     """Construct the Ghostscript command for compression."""
 
     return [

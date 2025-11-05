@@ -8,6 +8,8 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
 - ⚙️ **Ghostscript-powered compression** – choose between low, medium, or high compression levels.
 - 🧭 **Simple UX** – clean interface with real-time status updates and automatic downloads.
 - 🧪 **Tested endpoints** – pytest-based coverage for core behaviours.
+- 🛡️ **Built-in rate limiting** – protects the compression endpoint from abusive traffic.
+- 🤖 **Automated quality gates** – GitHub Actions workflow runs formatting, linting, type-checking, tests, and security audits.
 
 ## Prerequisites
 
@@ -44,16 +46,36 @@ The app stores uploads in `uploads/` and compressed files in `compressed/`. Both
 ## Tests
 
 ```bash
-pip install pytest
-pytest
+pip install -r requirements-dev.txt
+
+black --check .
+isort --check-only --profile black .
+flake8
+mypy app.py tests
+pytest --cov --cov-report=term-missing
+pip-audit
 ```
 
-Tests mock Ghostscript so they run quickly without needing the binary.
+Tests mock Ghostscript so they run quickly without needing the binary. Coverage reports are generated via `pytest --cov`.
 
 ## Configuration
 
 - `MAX_CONTENT_LENGTH` – defaults to 20 MiB and prevents oversized uploads.
+- `COMPRESS_RATE_LIMIT` – defaults to `10 per minute` and controls how many compression requests a single client can make.
+- `RATELIMIT_STORAGE_URI` – defaults to in-memory storage; point this to Redis or Memcached in production.
 - Security headers are applied automatically (`CSP`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`).
+
+## Continuous Integration
+
+The repository ships with a GitHub Actions workflow (`.github/workflows/ci.yml`) that verifies every push and pull request by running:
+
+1. Black and isort format checks.
+2. Flake8 linting.
+3. Mypy type checks.
+4. Pytest with coverage reporting.
+5. `pip-audit` for dependency vulnerabilities.
+
+The pipeline ensures code quality and security checks remain consistent across environments.
 
 ## Deployment Notes
 
