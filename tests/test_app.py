@@ -11,7 +11,7 @@ import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import create_app, limiter
+from app import _detect_ghostscript_executable, create_app, limiter
 
 
 @pytest.fixture()
@@ -110,9 +110,9 @@ def test_compress_missing_ghostscript_binary(client):
 
     assert response.status_code == 503
     assert response.is_json
-    assert (
-        response.get_json()["message"]
-        == "Ghostscript is not available on the server. Please install it and ensure it can be executed."
+    assert response.get_json()["message"] == (
+        "Ghostscript is not available on the server. Please install it and ensure it can be "
+        "executed."
     )
 
 
@@ -158,3 +158,37 @@ def test_compress_rate_limit_exceeded(tmp_path: Path):
         responses[-1].get_json()["message"]
         == "Too many requests, please try again later."
     )
+
+
+def test_detect_ghostscript_uses_explicit_path(monkeypatch, tmp_path: Path):
+    custom_executable = tmp_path / "custom" / "gs-custom.exe"
+    custom_executable.parent.mkdir(parents=True, exist_ok=True)
+    custom_executable.write_bytes(b"")
+
+    monkeypatch.setenv("GHOSTSCRIPT_COMMAND", str(custom_executable))
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    with patch("app.shutil.which", return_value=None):
+        detected = _detect_ghostscript_executable()
+
+    assert detected == str(custom_executable)
+
+
+def test_detect_ghostscript_scans_windows_installation(monkeypatch, tmp_path: Path):
+    program_files = tmp_path / "Program Files"
+    ghostscript_bin = program_files / "gs" / "gs10.06.0" / "bin"
+    ghostscript_bin.mkdir(parents=True, exist_ok=True)
+    executable_path = ghostscript_bin / "gswin64c.exe"
+    executable_path.write_bytes(b"")
+
+    monkeypatch.delenv("GHOSTSCRIPT_COMMAND", raising=False)
+    monkeypatch.setenv("PROGRAMFILES", str(program_files))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    with patch("app.shutil.which", return_value=None):
+        detected = _detect_ghostscript_executable()
+
+    assert detected == str(executable_path)

@@ -16,6 +16,7 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
 - Python 3.10+
 - [Ghostscript](https://ghostscript.com/) installed and available on the system `PATH`
   - The application auto-detects common executables (`gs`, `gswin64c`, `gswin32c`).
+  - On Windows the detector also scans typical installation folders inside `Program Files` if the binary is not on `PATH`.
   - Override the detection with the `GHOSTSCRIPT_COMMAND` environment variable if Ghostscript is installed in a custom location.
 
 ## Documentation
@@ -51,7 +52,7 @@ A secure, server-side PDF compression utility built with Flask, Ghostscript, and
    gs --version
    ```
 
-   On Windows the executable may be named `gswin64c` or `gswin32c`. Override the detection if necessary by exporting `GHOSTSCRIPT_COMMAND=/path/to/ghostscript`.
+   On Windows the executable may be named `gswin64c` or `gswin32c`. The application searches common installation folders automatically, but you can override the detection by exporting `GHOSTSCRIPT_COMMAND=/path/to/ghostscript` when needed.
 
 5. (Optional) Install developer tooling:
 
