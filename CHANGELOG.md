@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 - Arabic end-to-end setup guide covering Ghostscript installation and environment preparation.
 - README pointers and expanded installation checklist for Ghostscript and developer tooling.
 - Optional "preserve images" toggle that disables Ghostscript downsampling for high-fidelity documents.
+- Dedicated Arabic API reference documenting the `/compress` endpoint, request schema, and error handling.
 ### Changed
 - Improved Ghostscript auto-detection to honour explicit paths and scan typical Windows installation directories, preventing `503` errors when the binary is installed but not on `PATH`.
 - Added a runtime fallback for Flask-Limiter so the app and tests work even when the optional dependency is unavailable.
