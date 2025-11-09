@@ -396,36 +396,17 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             )
 
         def _client_requests_json() -> bool:
-            accept_header = request.headers.get("Accept")
-            if not accept_header:
+            accept = request.accept_mimetypes
+
+            if accept["application/json"] <= 0:
                 return False
 
-            if request.accept_mimetypes["application/json"] <= 0:
-                return False
+            best = accept.best_match(
+                ["application/pdf", "application/json"],
+                default="application/pdf",
+            )
 
-            for raw_part in accept_header.split(","):
-                part = raw_part.strip()
-                if not part:
-                    continue
-                media_type, _, params = part.partition(";")
-                if media_type.strip().lower() != "application/json":
-                    continue
-
-                q_value = 1.0
-                for param in params.split(";"):
-                    param = param.strip()
-                    if not param:
-                        continue
-                    if param.lower().startswith("q="):
-                        try:
-                            q_value = float(param.split("=", 1)[1])
-                        except ValueError:
-                            q_value = 0.0
-                        break
-
-                return q_value > 0
-
-            return False
+            return best == "application/json"
 
         wants_json = _client_requests_json()
 
