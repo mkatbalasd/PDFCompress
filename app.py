@@ -1,4 +1,4 @@
-"""Flask application that exposes an endpoint for compressing PDF files."""
+"""Flask application exposing HTML and API endpoints for PDF compression."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import uuid
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, TypeVar
 
@@ -19,7 +21,8 @@ from flask import (
     jsonify,
     render_template,
     request,
-    send_from_directory,
+    send_file,
+    current_app,
 )
 from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
@@ -31,20 +34,18 @@ if TYPE_CHECKING:
     from flask_limiter import Limiter  # type: ignore[import-not-found]
     from flask_limiter.util import get_remote_address  # type: ignore[import-not-found]
 else:
-    if (
-        importlib.util.find_spec("flask_limiter") is None
-    ):  # pragma: no cover - optional dep
+    if importlib.util.find_spec("flask_limiter") is None:  # pragma: no cover - optional dep
 
-        class Limiter:
+        class Limiter:  # type: ignore[too-many-ancestors]
             """Fallback Limiter implementation used when Flask-Limiter is absent."""
 
-            def __init__(self, *_, **__):
+            def __init__(self, *_: Any, **__: Any) -> None:
                 pass
 
             def init_app(self, *_: Any, **__: Any) -> None:
                 """Stubbed hook matching Flask-Limiter's init_app."""
 
-            def limit(self, _limit_value: Any) -> Callable[[_F], _F]:
+            def limit(self, _limit_value: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
                 """Return a decorator that leaves the wrapped function unchanged."""
 
                 def decorator(func: _F) -> _F:
@@ -67,12 +68,13 @@ else:
         from flask_limiter.util import get_remote_address
 
 
-# Directory configuration
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_FOLDER = BASE_DIR / "uploads"
-COMPRESSED_FOLDER = BASE_DIR / "compressed"
+DEFAULT_UPLOAD_FOLDER = BASE_DIR / "uploads"
+DEFAULT_COMPRESSED_FOLDER = BASE_DIR / "compressed"
+DEFAULT_MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100 MiB
+DEFAULT_COMPRESS_RATE_LIMIT = "10 per minute"
+DEFAULT_GHOSTSCRIPT_COMMAND = "gs"
 
-# Compression level to Ghostscript preset mapping
 COMPRESSION_PRESETS: Dict[str, str] = {
     "low": "/printer",
     "medium": "/ebook",
@@ -81,55 +83,94 @@ COMPRESSION_PRESETS: Dict[str, str] = {
 
 ALLOWED_EXTENSIONS = {"pdf"}
 DEFAULT_DOWNLOAD_NAME = "document"
-MAX_CONTENT_LENGTH_BYTES = 20 * 1024 * 1024  # 20 MiB
+
+def _rate_limit_key() -> str:
+    """Build a composite rate-limit key incorporating the configured prefix."""
+
+    address = get_remote_address()
+    if has_request_context():
+        prefix = current_app.config.get("RATELIMIT_KEY_PREFIX", "pdf-compress")
+        return f"{prefix}:{address}"
+    return address
 
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=_rate_limit_key,
     default_limits=[],
 )
+
+
+@dataclass
+class CompressionResult:
+    """Container for compression metadata returned by Ghostscript."""
+
+    output_path: Path
+    download_name: str
+    original_bytes: int
+    compressed_bytes: int
+    request_id: str
+
+
+class CompressionStorageError(RuntimeError):
+    """Raised when uploaded files cannot be persisted to disk."""
 
 
 def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     """Application factory used by tests and the production server."""
 
     app = Flask(__name__)
-    app.config.update(
-        UPLOAD_FOLDER=str(UPLOAD_FOLDER),
-        COMPRESSED_FOLDER=str(COMPRESSED_FOLDER),
-        MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH_BYTES,
-    )
 
-    app.config.setdefault(
-        "COMPRESS_RATE_LIMIT",
-        os.environ.get("COMPRESS_RATE_LIMIT", "10 per minute"),
-    )
-    app.config.setdefault(
-        "RATELIMIT_STORAGE_URI",
-        os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
-    )
-    app.config.setdefault("RATELIMIT_ENABLED", True)
-    app.config.setdefault("RATELIMIT_KEY_PREFIX", "pdf-compress")
+    default_config: Dict[str, Any] = {
+        "UPLOAD_FOLDER": os.environ.get("UPLOAD_FOLDER", str(DEFAULT_UPLOAD_FOLDER)),
+        "COMPRESSED_FOLDER": os.environ.get(
+            "COMPRESSED_FOLDER", str(DEFAULT_COMPRESSED_FOLDER)
+        ),
+        "MAX_CONTENT_LENGTH": _coerce_int(
+            os.environ.get("MAX_CONTENT_LENGTH"), DEFAULT_MAX_CONTENT_LENGTH
+        ),
+        "COMPRESS_RATE_LIMIT": os.environ.get(
+            "COMPRESS_RATE_LIMIT", DEFAULT_COMPRESS_RATE_LIMIT
+        ),
+        "RATELIMIT_STORAGE_URI": os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+        "RATELIMIT_ENABLED": True,
+        "RATELIMIT_KEY_PREFIX": "pdf-compress",
+        "APP_VERSION": os.environ.get("APP_VERSION", "1.0.0"),
+        "BUILD_COMMIT": os.environ.get("APP_COMMIT"),
+        "BUILD_TIME": os.environ.get("APP_BUILD_TIME"),
+    }
 
-    env_ghostscript_command = os.environ.get("GHOSTSCRIPT_COMMAND")
-    if env_ghostscript_command:
-        app.config.setdefault("GHOSTSCRIPT_COMMAND", env_ghostscript_command)
+    for key, value in default_config.items():
+        app.config.setdefault(key, value)
 
     if test_config:
         app.config.update(test_config)
 
-    if "GHOSTSCRIPT_COMMAND" not in app.config:
-        app.config["GHOSTSCRIPT_COMMAND"] = _detect_ghostscript_executable()
+    app.config["MAX_CONTENT_LENGTH"] = _coerce_int(
+        app.config.get("MAX_CONTENT_LENGTH"), DEFAULT_MAX_CONTENT_LENGTH
+    )
 
-    if app.config.get("GHOSTSCRIPT_COMMAND") in {"", None}:
-        app.config["GHOSTSCRIPT_COMMAND"] = _detect_ghostscript_executable()
+    ghostscript_candidate = (
+        app.config.get("GHOSTSCRIPT_COMMAND")
+        or os.environ.get("GHOSTSCRIPT_COMMAND")
+        or DEFAULT_GHOSTSCRIPT_COMMAND
+    )
+    if ghostscript_candidate:
+        app.config.setdefault("GHOSTSCRIPT_COMMAND", ghostscript_candidate)
 
-    # Ensure directories exist
+    if not app.config.get("GHOSTSCRIPT_COMMAND"):
+        detected = _detect_ghostscript_executable()
+        if detected:
+            app.config["GHOSTSCRIPT_COMMAND"] = detected
+
+    if "API_KEYS" in app.config:
+        app.config["API_KEYS"] = _parse_api_keys(app.config["API_KEYS"])
+    else:
+        app.config["API_KEYS"] = _parse_api_keys(os.environ.get("API_KEYS"))
+
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
     Path(app.config["COMPRESSED_FOLDER"]).mkdir(parents=True, exist_ok=True)
 
     limiter.init_app(app)
-
     _configure_logging(app)
 
     @app.after_request
@@ -147,23 +188,52 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
 
     @app.errorhandler(RequestEntityTooLarge)
     def handle_file_too_large(_: RequestEntityTooLarge) -> Response:
-        response = jsonify({"message": "The uploaded file exceeds the 20 MiB limit."})
+        limit_bytes = int(app.config.get("MAX_CONTENT_LENGTH") or DEFAULT_MAX_CONTENT_LENGTH)
+        limit_mib = limit_bytes / (1024 * 1024)
+        limit_display = f"{limit_mib:.0f}" if float(limit_mib).is_integer() else f"{limit_mib:.2f}"
+        detail = f"The uploaded file exceeds the {limit_display} MiB limit."
+        if request.path.startswith("/api/"):
+            return _api_error_response(413, "payload_too_large", detail)
+        response = jsonify({"message": detail})
         response.status_code = 413
         return response
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(error: HTTPException) -> Response:
-        """Return JSON for HTTP errors triggered inside the API."""
-
-        response = jsonify({"message": error.description})
+        detail = error.description or "An unexpected error occurred."
+        if request.path.startswith("/api/"):
+            error_code = (error.name or "error").lower().replace(" ", "_")
+            return _api_error_response(error.code or 500, error_code, detail)
+        response = jsonify({"message": detail})
         response.status_code = error.code or 500
         return response
 
     @app.errorhandler(TooManyRequests)
     def handle_rate_limit(_: TooManyRequests) -> Response:
-        response = jsonify({"message": "Too many requests, please try again later."})
+        detail = "Too many requests, please try again later."
+        if request.path.startswith("/api/"):
+            return _api_error_response(429, "rate_limited", detail)
+        response = jsonify({"message": detail})
         response.status_code = 429
         return response
+
+    def require_api_key(func: _F) -> _F:
+        """Decorator enforcing API key verification when configured."""
+
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any):
+            configured_keys: set[str] = app.config.get("API_KEYS", set())
+            if configured_keys:
+                provided_key = request.headers.get("X-API-Key", "").strip()
+                if provided_key not in configured_keys:
+                    return _api_error_response(
+                        401,
+                        "unauthorized",
+                        "A valid API key must be supplied via the X-API-Key header.",
+                    )
+            return func(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
 
     @app.route("/", methods=["GET"])
     def index() -> str:
@@ -172,7 +242,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         return render_template("index.html")
 
     @app.route("/compress", methods=["POST"])
-    @limiter.limit(lambda: app.config.get("COMPRESS_RATE_LIMIT", "10 per minute"))
+    @limiter.limit(lambda: app.config.get("COMPRESS_RATE_LIMIT", DEFAULT_COMPRESS_RATE_LIMIT))
     def compress() -> Response:
         """Compress an uploaded PDF using Ghostscript and return the result."""
 
@@ -182,13 +252,15 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             response.status_code = 400
             return response
 
-        compression_level = request.form.get("compression_level", "medium").lower()
-        if compression_level not in COMPRESSION_PRESETS:
+        profile = request.form.get("compression_level", "medium").lower()
+        if profile not in COMPRESSION_PRESETS:
             response = jsonify({"message": "Invalid compression level supplied."})
             response.status_code = 400
             return response
 
-        preserve_images = _is_truthy_flag(request.form.get("preserve_images"))
+        keep_images = _is_truthy_flag(request.form.get("preserve_images")) or _is_truthy_flag(
+            request.form.get("keep_images")
+        )
 
         if not _is_pdf(uploaded_file):
             response = jsonify(
@@ -197,61 +269,32 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             response.status_code = 400
             return response
 
-        unique_input_name = f"{uuid.uuid4().hex}.pdf"
-        unique_output_name = f"{uuid.uuid4().hex}.pdf"
-        upload_path = Path(app.config["UPLOAD_FOLDER"]) / unique_input_name
-        output_path = Path(app.config["COMPRESSED_FOLDER"]) / unique_output_name
-
-        try:
-            uploaded_file.save(upload_path)
-        except OSError as error:
-            app.logger.error("Failed to save uploaded file: %s", error)
-            response = jsonify({"message": "Failed to save the uploaded file."})
-            response.status_code = 500
-            return response
-
-        @after_this_request
-        def cleanup(response: Response) -> Response:
-            """Ensure temporary files are deleted after the response is sent."""
-
-            for path in (upload_path, output_path):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as cleanup_error:
-                    app.logger.warning(
-                        "Could not remove temporary file %s: %s", path, cleanup_error
-                    )
-            return response
-
         ghostscript_binary = app.config.get("GHOSTSCRIPT_COMMAND")
         if not ghostscript_binary:
             app.logger.error("Ghostscript executable is not configured or found.")
             response = jsonify(
                 {
                     "message": (
-                        "Ghostscript is not available on the server. Please install it "
-                        "and ensure it can be executed."
+                        "Ghostscript is not available on the server. Please install it and ensure it can be executed."
                     )
                 }
             )
             response.status_code = 503
             return response
 
-        command = _build_ghostscript_command(
-            executable=str(ghostscript_binary),
-            input_path=upload_path,
-            output_path=output_path,
-            preset=COMPRESSION_PRESETS[compression_level],
-            preserve_images=preserve_images,
-        )
-
         try:
-            subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
+            result = _compress_file(
+                app,
+                uploaded_file,
+                ghostscript_binary,
+                preset=COMPRESSION_PRESETS[profile],
+                keep_images=keep_images,
             )
+        except CompressionStorageError as error:
+            app.logger.error("Failed to save uploaded file: %s", error)
+            response = jsonify({"message": "Failed to save the uploaded file."})
+            response.status_code = 500
+            return response
         except FileNotFoundError:
             app.logger.exception("Ghostscript executable not found.")
             response = jsonify(
@@ -271,14 +314,141 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             response.status_code = 500
             return response
 
-        download_name = _build_download_name(uploaded_file.filename)
-        return send_from_directory(
-            directory=output_path.parent,
-            path=output_path.name,
+        return send_file(
+            result.output_path,
             as_attachment=True,
-            download_name=download_name,
+            download_name=result.download_name,
             mimetype="application/pdf",
         )
+
+    @app.route("/api/compress", methods=["POST"])
+    @limiter.limit(lambda: app.config.get("COMPRESS_RATE_LIMIT", DEFAULT_COMPRESS_RATE_LIMIT))
+    @require_api_key
+    def api_compress() -> Response:
+        """API endpoint that compresses a PDF and returns binary or JSON metadata."""
+
+        uploaded_file = _extract_file(request.files)
+        if uploaded_file is None:
+            return _api_error_response(
+                400,
+                "missing_file",
+                "A PDF file must be provided in the 'file' form field.",
+            )
+
+        profile = request.form.get("profile", "medium").lower()
+        if profile not in COMPRESSION_PRESETS:
+            return _api_error_response(
+                400,
+                "invalid_profile",
+                "Profile must be one of: low, medium, high.",
+            )
+
+        keep_images = _is_truthy_flag(request.form.get("keep_images"))
+
+        if not _is_pdf(uploaded_file):
+            return _api_error_response(
+                415,
+                "unsupported_media_type",
+                "Only PDF documents are supported for compression.",
+            )
+
+        ghostscript_binary = app.config.get("GHOSTSCRIPT_COMMAND")
+        if not ghostscript_binary:
+            app.logger.error("Ghostscript executable is not configured or found.")
+            return _api_error_response(
+                503,
+                "ghostscript_unavailable",
+                "Ghostscript is not available on the server. Please install it and ensure it can be executed.",
+            )
+
+        try:
+            result = _compress_file(
+                app,
+                uploaded_file,
+                ghostscript_binary,
+                preset=COMPRESSION_PRESETS[profile],
+                keep_images=keep_images,
+            )
+        except CompressionStorageError as error:
+            app.logger.error("Failed to save uploaded file: %s", error)
+            return _api_error_response(
+                500,
+                "storage_error",
+                "Failed to save the uploaded file.",
+            )
+        except FileNotFoundError:
+            app.logger.exception("Ghostscript executable not found.")
+            return _api_error_response(
+                500,
+                "ghostscript_not_found",
+                "Ghostscript is not installed on the server.",
+            )
+        except subprocess.CalledProcessError as error:
+            app.logger.error(
+                "Ghostscript failed with exit code %s: %s",
+                error.returncode,
+                error.stderr,
+            )
+            return _api_error_response(
+                500,
+                "ghostscript_error",
+                "Ghostscript failed while compressing the file.",
+            )
+
+        preferred = request.accept_mimetypes.best_match(
+            ["application/json", "application/pdf"],
+            default="application/pdf",
+        )
+        wants_json = preferred == "application/json"
+
+        if wants_json:
+            ratio = (
+                result.compressed_bytes / result.original_bytes
+                if result.original_bytes > 0
+                else 0.0
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "original_bytes": result.original_bytes,
+                    "compressed_bytes": result.compressed_bytes,
+                    "ratio": round(ratio, 4),
+                    "profile": profile,
+                    "request_id": result.request_id,
+                }
+            )
+
+        return send_file(
+            result.output_path,
+            as_attachment=True,
+            download_name=result.download_name,
+            mimetype="application/pdf",
+        )
+
+    @app.route("/healthz", methods=["GET"])
+    def healthz() -> Response:
+        """Return application and Ghostscript status."""
+
+        ghostscript = app.config.get("GHOSTSCRIPT_COMMAND")
+        return jsonify(
+            {
+                "status": "ok",
+                "ghostscript": ghostscript,
+                "version": app.config.get("APP_VERSION"),
+            }
+        )
+
+    @app.route("/api/version", methods=["GET"])
+    @require_api_key
+    def api_version() -> Response:
+        """Expose build and version metadata for programmatic clients."""
+
+        payload = {
+            "version": app.config.get("APP_VERSION"),
+            "commit": app.config.get("BUILD_COMMIT"),
+            "build_time": app.config.get("BUILD_TIME"),
+        }
+        return jsonify({key: value for key, value in payload.items() if value is not None})
 
     return app
 
@@ -291,6 +461,36 @@ def _configure_logging(app: Flask) -> None:
         handler.setLevel(logging.INFO)
         app.logger.addHandler(handler)
     app.logger.setLevel(logging.INFO)
+
+
+def _coerce_int(value: str | int | None, default: int) -> int:
+    """Convert an environment string to an integer, falling back to a default."""
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    return default
+
+
+def _api_error_response(status_code: int, error: str, detail: str) -> Response:
+    response = jsonify({"ok": False, "error": error, "detail": detail})
+    response.status_code = status_code
+    return response
+
+
+def _parse_api_keys(value: Any) -> set[str]:
+    if not value:
+        return set()
+    if isinstance(value, str):
+        tokens = value.split(",")
+    else:
+        tokens = list(value)
+    parsed = {str(token).strip() for token in tokens if str(token).strip()}
+    return parsed
 
 
 def _extract_file(files: Any) -> FileStorage | None:
@@ -325,6 +525,90 @@ def _is_pdf(uploaded_file: FileStorage) -> bool:
 
 def _has_allowed_extension(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _compress_file(
+    app: Flask,
+    uploaded_file: FileStorage,
+    ghostscript_binary: str,
+    *,
+    preset: str,
+    keep_images: bool,
+) -> CompressionResult:
+    """Persist the upload, invoke Ghostscript, and return compression metadata."""
+
+    unique_input_name = f"{uuid.uuid4().hex}.pdf"
+    unique_output_name = f"{uuid.uuid4().hex}.pdf"
+    upload_path = Path(app.config["UPLOAD_FOLDER"]) / unique_input_name
+    output_path = Path(app.config["COMPRESSED_FOLDER"]) / unique_output_name
+
+    try:
+        uploaded_file.save(upload_path)
+    except OSError as error:
+        raise CompressionStorageError(str(error)) from error
+
+    @after_this_request
+    def cleanup(response: Response) -> Response:
+        for path in (upload_path, output_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                app.logger.warning(
+                    "Could not remove temporary file %s: %s", path, cleanup_error
+                )
+        return response
+
+    command = _build_ghostscript_command(
+        executable=str(ghostscript_binary),
+        input_path=upload_path,
+        output_path=output_path,
+        preset=preset,
+        preserve_images=keep_images,
+    )
+
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    download_name = _build_download_name(uploaded_file.filename)
+    return CompressionResult(
+        output_path=output_path,
+        download_name=download_name,
+        original_bytes=_safe_file_size(upload_path),
+        compressed_bytes=_safe_file_size(output_path),
+        request_id=uuid.uuid4().hex,
+    )
+
+
+def _safe_file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _is_truthy_flag(value: str | None) -> bool:
+    """Interpret checkbox-style form values as booleans."""
+
+    if value is None:
+        return False
+
+    normalized = value.strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _build_download_name(original_filename: str | None) -> str:
+    """Generate a safe, user-friendly name for the compressed file."""
+
+    if not original_filename:
+        base_name = DEFAULT_DOWNLOAD_NAME
+    else:
+        sanitized = secure_filename(original_filename)
+        base_name = Path(sanitized).stem or DEFAULT_DOWNLOAD_NAME
+    return f"{base_name}-compressed.pdf"
 
 
 def _build_ghostscript_command(
@@ -363,27 +647,6 @@ def _build_ghostscript_command(
     command.append(normalized_input)
 
     return command
-
-
-def _is_truthy_flag(value: str | None) -> bool:
-    """Interpret checkbox-style form values as booleans."""
-
-    if value is None:
-        return False
-
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "yes", "on"}
-
-
-def _build_download_name(original_filename: str | None) -> str:
-    """Generate a safe, user-friendly name for the compressed file."""
-
-    if not original_filename:
-        base_name = DEFAULT_DOWNLOAD_NAME
-    else:
-        sanitized = secure_filename(original_filename)
-        base_name = Path(sanitized).stem or DEFAULT_DOWNLOAD_NAME
-    return f"{base_name}-compressed.pdf"
 
 
 def _normalize_path_for_ghostscript(path: Path) -> str:
@@ -430,6 +693,7 @@ def _detect_ghostscript_executable() -> str | None:
 
 
 app = create_app()
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
