@@ -149,6 +149,33 @@ flask --app app run --debug
 
 سيعمل الخادم على العنوان `http://127.0.0.1:5000/`. افتح المتصفح وتوجه للعنوان لرفع ملفات PDF وتجربة الضغط.
 
+### التحقق من نقطة `/api/compress`
+
+- الاستجابة الافتراضية هي ملف PDF حتى دون إرسال ترويسة `Accept`:
+
+  ```bash
+  curl -s -X POST http://localhost:8080/api/compress \
+    -F "file=@/path/to/input.pdf" -F "profile=medium" \
+    --output compressed.pdf
+  ```
+
+- لعرض بيانات JSON، أرسل `Accept: application/json`:
+
+  ```bash
+  curl -s -X POST http://localhost:8080/api/compress \
+    -H "Accept: application/json" \
+    -F "file=@/path/to/input.pdf" -F "profile=high"
+  ```
+
+- عند تفعيل مفاتيح API، أضف الترويسة `X-API-Key` مع مراعاة حد المعدّل الافتراضي `10 طلبات في الدقيقة` لكل عنوان IP:
+
+  ```bash
+  curl -s -X POST http://localhost:8080/api/compress \
+    -H "X-API-Key: YOUR_KEY" \
+    -F "file=@/path/to/input.pdf" \
+    --output compressed.pdf
+  ```
+
 ## 9. تشغيل الاختبارات والتحقق من الجودة
 
 لضمان سلامة البيئة، نفّذ الأوامر التالية (خاصة قبل تقديم أي تغييرات):

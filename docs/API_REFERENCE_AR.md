@@ -38,7 +38,7 @@
 
 | الترويسة `Accept` | نوع الاستجابة | الوصف |
 | --- | --- | --- |
-| غير محدد أو `application/pdf` | ملف PDF | يتم تنزيل الملف المضغوط مباشرة مع ترويسة `Content-Disposition`. |
+| غير محدد، `*/*`، أو `application/pdf` | ملف PDF | يتم تنزيل الملف المضغوط مباشرة مع ترويسة `Content-Disposition`. |
 | `application/json` | JSON | معلومات عن عملية الضغط (أحجام الملفات، النسبة، المعرّف الفريد). |
 
 ### مثال استجابة JSON ناجحة
@@ -56,7 +56,7 @@
 
 ### أمثلة باستخدام `curl`
 
-#### تنزيل الملف المضغوط
+#### تنزيل الملف المضغوط (الوضع الافتراضي)
 
 ```bash
 curl -s -X POST http://localhost:8080/api/compress \
@@ -64,7 +64,7 @@ curl -s -X POST http://localhost:8080/api/compress \
   --output compressed.pdf
 ```
 
-#### الحصول على استجابة JSON
+#### الحصول على استجابة JSON (عند طلب `Accept: application/json`)
 
 ```bash
 curl -s -X POST http://localhost:8080/api/compress \

@@ -76,6 +76,24 @@ def test_api_compress_binary_response(api_client) -> None:
     assert len(response.data) <= len(b"%PDF-1.4 test content")
 
 
+def test_api_compress_wildcard_accept_returns_pdf(api_client) -> None:
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 wildcard")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "profile": "low",
+    }
+
+    with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
+        response = api_client.post(
+            "/api/compress",
+            data=data,
+            headers={"Accept": "*/*"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("application/pdf")
+
+
 def test_api_compress_json_response(api_client) -> None:
     pdf_bytes = io.BytesIO(b"%PDF-1.4 another test")
     data = {

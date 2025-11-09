@@ -395,11 +395,39 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 "Ghostscript failed while compressing the file.",
             )
 
-        preferred = request.accept_mimetypes.best_match(
-            ["application/json", "application/pdf"],
-            default="application/pdf",
-        )
-        wants_json = preferred == "application/json"
+        def _client_requests_json() -> bool:
+            accept_header = request.headers.get("Accept")
+            if not accept_header:
+                return False
+
+            if request.accept_mimetypes["application/json"] <= 0:
+                return False
+
+            for raw_part in accept_header.split(","):
+                part = raw_part.strip()
+                if not part:
+                    continue
+                media_type, _, params = part.partition(";")
+                if media_type.strip().lower() != "application/json":
+                    continue
+
+                q_value = 1.0
+                for param in params.split(";"):
+                    param = param.strip()
+                    if not param:
+                        continue
+                    if param.lower().startswith("q="):
+                        try:
+                            q_value = float(param.split("=", 1)[1])
+                        except ValueError:
+                            q_value = 0.0
+                        break
+
+                return q_value > 0
+
+            return False
+
+        wants_json = _client_requests_json()
 
         if wants_json:
             ratio = (
