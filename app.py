@@ -152,15 +152,15 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     ghostscript_candidate = (
         app.config.get("GHOSTSCRIPT_COMMAND")
         or os.environ.get("GHOSTSCRIPT_COMMAND")
-        or DEFAULT_GHOSTSCRIPT_COMMAND
     )
     if ghostscript_candidate:
-        app.config.setdefault("GHOSTSCRIPT_COMMAND", ghostscript_candidate)
-
-    if not app.config.get("GHOSTSCRIPT_COMMAND"):
+        app.config["GHOSTSCRIPT_COMMAND"] = ghostscript_candidate
+    else:
         detected = _detect_ghostscript_executable()
         if detected:
             app.config["GHOSTSCRIPT_COMMAND"] = detected
+
+    app.config.setdefault("GHOSTSCRIPT_COMMAND", DEFAULT_GHOSTSCRIPT_COMMAND)
 
     if "API_KEYS" in app.config:
         app.config["API_KEYS"] = _parse_api_keys(app.config["API_KEYS"])
