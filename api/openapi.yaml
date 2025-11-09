@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: PDF Compression Service
+  version: 1.0.0
+  description: >-
+    Production-ready API for compressing PDF documents via Ghostscript. The
+    service also ships with a simple HTML form at `/` for manual uploads.
+servers:
+  - url: http://localhost:8080
+    description: Local development via Docker Compose
+paths:
+  /healthz:
+    get:
+      summary: Health probe
+      description: Returns basic service metadata and the detected Ghostscript binary.
+      tags: [Meta]
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, ghostscript, version]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  ghostscript:
+                    type: string
+                    nullable: true
+                    description: Path or executable name used to invoke Ghostscript.
+                  version:
+                    type: string
+                    example: 1.0.0
+  /api/compress:
+    post:
+      summary: Compress a PDF document
+      description: >-
+        Upload a PDF and receive a compressed version. The endpoint returns a PDF
+        stream by default. Send `Accept: application/json` to receive metadata
+        about the compression result instead of the binary file. If API keys are
+        configured, include `X-API-Key` in the request headers.
+      tags: [Compression]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF document to compress.
+                profile:
+                  type: string
+                  description: Compression profile. Defaults to `medium`.
+                  enum: [low, medium, high]
+                keep_images:
+                  type: boolean
+                  description: Preserve image quality by disabling downsampling.
+            encoding:
+              file:
+                contentType: application/pdf
+      responses:
+        '200':
+          description: Compression succeeded
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+              examples:
+                download:
+                  summary: Compressed PDF download
+                  description: Binary PDF stream returned when no JSON is requested.
+                  value: ''
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompressionSuccess'
+              examples:
+                metadata:
+                  summary: Compression metadata
+                  value:
+                    ok: true
+                    original_bytes: 5242880
+                    compressed_bytes: 2621440
+                    ratio: 0.5
+                    profile: medium
+                    request_id: 8f5b6a3c2d7e4a9f9b0c1d2e3f4a5b6c
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidProfile:
+                  summary: Unsupported profile
+                  value:
+                    ok: false
+                    error: invalid_profile
+                    detail: Profile must be one of: low, medium, high.
+        '401':
+          description: Missing or invalid API key (when enabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingKey:
+                  summary: Authentication required
+                  value:
+                    ok: false
+                    error: unauthorized
+                    detail: A valid API key must be supplied via the X-API-Key header.
+        '413':
+          description: Uploaded file exceeds size limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                tooLarge:
+                  summary: Payload too large
+                  value:
+                    ok: false
+                    error: payload_too_large
+                    detail: The uploaded file exceeds the 100 MiB limit.
+        '415':
+          description: Unsupported media type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                wrongType:
+                  summary: Non-PDF upload
+                  value:
+                    ok: false
+                    error: unsupported_media_type
+                    detail: Only PDF documents are supported for compression.
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                throttled:
+                  summary: Too many requests
+                  value:
+                    ok: false
+                    error: rate_limited
+                    detail: Too many requests, please try again later.
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                ghostscriptFailure:
+                  summary: Ghostscript execution failure
+                  value:
+                    ok: false
+                    error: ghostscript_error
+                    detail: Ghostscript failed while compressing the file.
+        '503':
+          description: Ghostscript missing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unavailable:
+                  summary: Ghostscript not installed
+                  value:
+                    ok: false
+                    error: ghostscript_unavailable
+                    detail: Ghostscript is not available on the server. Please install it and ensure it can be executed.
+  /api/version:
+    get:
+      summary: Retrieve build metadata
+      description: Returns semantic version, commit hash, and build timestamp when available.
+      tags: [Meta]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                  commit:
+                    type: string
+                    nullable: true
+                  build_time:
+                    type: string
+                    nullable: true
+              examples:
+                example:
+                  value:
+                    version: 1.0.0
+                    commit: d34db33f
+                    build_time: 2024-05-15T12:00:00Z
+        '401':
+          description: Missing or invalid API key (when enabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >-
+        Optional API key enforcement. When the `API_KEYS` environment variable is
+        configured, requests must include a valid key.
+  schemas:
+    CompressionSuccess:
+      type: object
+      required:
+        - ok
+        - original_bytes
+        - compressed_bytes
+        - ratio
+        - profile
+        - request_id
+      properties:
+        ok:
+          type: boolean
+          const: true
+        original_bytes:
+          type: integer
+          minimum: 0
+        compressed_bytes:
+          type: integer
+          minimum: 0
+        ratio:
+          type: number
+          format: float
+          minimum: 0
+        profile:
+          type: string
+          enum: [low, medium, high]
+        request_id:
+          type: string
+          description: Unique identifier for the compression request.
+    ErrorResponse:
+      type: object
+      required: [ok, error, detail]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: string
+        detail:
+          type: string
