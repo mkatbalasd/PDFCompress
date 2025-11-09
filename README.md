@@ -1,121 +1,110 @@
-# PDF Compression Tool
+# PDF Compression Service
 
-A secure, server-side PDF compression utility built with Flask, Ghostscript, and a lightweight HTML/CSS/JavaScript frontend. Upload a PDF, pick a compression profile, and instantly download the optimized document.
+A production-ready Flask service that compresses PDF documents with Ghostscript. The
+project ships with both a web form for manual uploads and a clean HTTP API under
+`/api` for programmatic integrations.
 
-## Features
+## Quick start
 
-- 🔒 **Secure file handling** – temporary files receive random names and are deleted immediately after download.
-- ⚙️ **Ghostscript-powered compression** – choose between low, medium, or high compression levels.
-- 🖼️ **Optional image preservation** – keep original image quality when clarity is more important than file size.
-- 🧭 **Simple UX** – clean interface with real-time status updates and automatic downloads.
-- 🧪 **Tested endpoints** – pytest-based coverage for core behaviours.
-- 🛡️ **Built-in rate limiting** – protects the compression endpoint from abusive traffic.
-- 🤖 **Automated quality gates** – GitHub Actions workflow runs formatting, linting, type-checking, tests, and security audits.
+Run the fully containerised stack with a single command:
 
-## Prerequisites
+```bash
+./run.sh
+# or: docker compose up -d --build
+```
 
-- Python 3.10+
-- [Ghostscript](https://ghostscript.com/) installed and available on the system `PATH`
-  - The application auto-detects common executables (`gs`, `gswin64c`, `gswin32c`).
-  - On Windows the detector also scans typical installation folders inside `Program Files` if the binary is not on `PATH`.
-  - Override the detection with the `GHOSTSCRIPT_COMMAND` environment variable if Ghostscript is installed in a custom location.
+Once the container is healthy, the service listens on <http://localhost:8080>.
+Check the health endpoint:
+
+```bash
+curl -s http://localhost:8080/healthz | jq .
+```
+
+## API examples
+
+The API accepts `multipart/form-data` uploads and can return either the compressed
+PDF stream or JSON metadata depending on the `Accept` header.
+
+```bash
+curl -s -X POST http://localhost:8080/api/compress \
+  -F "file=@/path/to/input.pdf" -F "profile=medium" \
+  --output compressed.pdf
+```
+
+```bash
+curl -s -X POST http://localhost:8080/api/compress \
+  -H "Accept: application/json" \
+  -F "file=@/path/to/input.pdf" -F "profile=high"
+```
+
+```bash
+curl -s -X POST http://localhost:8080/api/compress \
+  -H "X-API-Key: YOUR_KEY" \
+  -F "file=@/path/to/input.pdf" \
+  --output compressed.pdf
+```
+
+Refer to [`api/openapi.yaml`](api/openapi.yaml) for the full OpenAPI 3.1
+specification covering `/healthz`, `/api/compress`, and `/api/version`.
+
+### Authentication
+
+Set the `API_KEYS` environment variable (comma separated) to enforce API key
+checks on `/api` routes. When configured, clients must send `X-API-Key: <value>`
+with every request. Leave the variable unset to allow open access.
+
+### Rate limiting & limits
+
+- Default rate limit: **10 requests per minute** per remote address (configurable
+  via `COMPRESS_RATE_LIMIT`).
+- Maximum upload size: **100 MiB** (`MAX_CONTENT_LENGTH`). Requests beyond this
+  threshold receive `413` responses.
+
+### Profiles
+
+Compression profiles map to Ghostscript presets:
+
+| Profile | Ghostscript preset | Use case |
+| --- | --- | --- |
+| `low` | `/printer` | Maximum compression, smaller documents |
+| `medium` | `/ebook` | Balanced size/quality (default) |
+| `high` | `/screen` | Highest quality, least compression |
+
+Pass `keep_images=true` in the API (or tick "Preserve images" in the UI) to
+prevent Ghostscript from downsampling images.
+
+## Development & testing
+
+Install dependencies locally if you prefer to run without Docker:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Ghostscript must be installed and reachable on `PATH` (`gs --version`).
+
+Run the test suite:
+
+```bash
+pytest
+```
+
+## Production notes
+
+- Place the service behind a reverse proxy (Nginx, Traefik, etc.) to terminate
+  TLS and enforce request size limits.
+- Persist or rotate `uploads/` and `compressed/` if long-term storage is needed;
+  by default files are temporary and cleaned after each request.
+- Override environment variables (e.g. `MAX_CONTENT_LENGTH`, `COMPRESS_RATE_LIMIT`)
+  for your workload and storage capabilities.
+- Monitor Ghostscript metrics and worker resource usage; adjust Gunicorn worker
+  counts (`-w`), threads (`-k gthread`), and timeout (`-t 120`) as needed.
 
 ## Documentation
 
-- 🇸🇦 **دليل الإعداد الشامل باللغة العربية:** راجع [docs/SETUP_AR.md](docs/SETUP_AR.md) للحصول على شرحٍ خطوة بخطوة يشمل تثبيت Ghostscript، تجهيز البيئة الافتراضية، تنفيذ الاختبارات، ومتطلبات النشر.
-- 🌐 **توثيق واجهة الـ API:** للاطلاع على تفاصيل نقطة النهاية `POST /compress`، أمثلة الطلبات، وأكواد الاستجابة، راجع [docs/API_REFERENCE_AR.md](docs/API_REFERENCE_AR.md).
-
-## Installation
-
-1. Create and activate a virtual environment:
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows use `.venv\\Scripts\\activate`
-   ```
-
-2. Upgrade `pip` and install the Python dependencies:
-
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
-
-3. Install Ghostscript for PDF compression. Common options:
-
-   - **macOS (Homebrew):** `brew install ghostscript`
-   - **Ubuntu/Debian:** `sudo apt-get install ghostscript`
-   - **Fedora/RHEL/CentOS:** `sudo dnf install ghostscript`
-   - **Windows:** Download the installer from the [Ghostscript website](https://ghostscript.com/releases/gsdnld.html) and select the *Add to PATH* option during setup.
-
-4. Verify the CLI is available:
-
-   ```bash
-   gs --version
-   ```
-
-   On Windows the executable may be named `gswin64c` or `gswin32c`. The application searches common installation folders automatically, but you can override the detection by exporting `GHOSTSCRIPT_COMMAND=/path/to/ghostscript` when needed.
-
-5. (Optional) Install developer tooling:
-
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
-
-## Running the Application
-
-1. Ensure the `gs` binary is available by running `gs --version`.
-2. Start the Flask development server:
-
-   ```bash
-   flask --app app run --debug
-   ```
-
-3. Navigate to `http://127.0.0.1:5000` in your browser.
-
-The app stores uploads in `uploads/` and compressed files in `compressed/`. Both directories are created automatically and are emptied after every request.
-
-## Tests
-
-```bash
-pip install -r requirements-dev.txt
-
-black --check .
-isort --check-only --profile black .
-flake8
-mypy app.py tests
-pytest --cov --cov-report=term-missing
-pip-audit
-```
-
-Tests mock Ghostscript so they run quickly without needing the binary. Coverage reports are generated via `pytest --cov`.
-
-## Configuration
-
-- `MAX_CONTENT_LENGTH` – defaults to 20 MiB and prevents oversized uploads.
-- `COMPRESS_RATE_LIMIT` – defaults to `10 per minute` and controls how many compression requests a single client can make.
-- `RATELIMIT_STORAGE_URI` – defaults to in-memory storage; point this to Redis or Memcached in production.
-- `GHOSTSCRIPT_COMMAND` – set to an explicit executable path when automatic detection cannot find Ghostscript.
-- Security headers are applied automatically (`CSP`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`).
-
-## Continuous Integration
-
-The repository ships with a GitHub Actions workflow (`.github/workflows/ci.yml`) that verifies every push and pull request by running:
-
-1. Black and isort format checks.
-2. Flake8 linting.
-3. Mypy type checks.
-4. Pytest with coverage reporting.
-5. `pip-audit` for dependency vulnerabilities.
-
-The pipeline ensures code quality and security checks remain consistent across environments.
-
-## Deployment Notes
-
-- Run behind a production-ready WSGI server such as Gunicorn or uWSGI.
-- Ensure `/tmp`, `uploads/`, and `compressed/` reside on a secure filesystem with adequate free space.
-- Rotate server logs regularly and restrict filesystem permissions for the application user.
-
-## License
-
-MIT
+- UI + API behaviour: [`docs/API_REFERENCE_AR.md`](docs/API_REFERENCE_AR.md)
+- Setup guide (Arabic): [`docs/SETUP_AR.md`](docs/SETUP_AR.md)
+- OpenAPI reference: [`api/openapi.yaml`](api/openapi.yaml)
