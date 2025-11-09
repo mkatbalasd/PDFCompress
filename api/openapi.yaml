@@ -68,7 +68,8 @@ paths:
                 contentType: application/pdf
       responses:
         '200':
-          description: Compression succeeded
+          description: Compression succeeded (PDF returned by default)
+          x-default-content-type: application/pdf
           content:
             application/pdf:
               schema:
