@@ -105,7 +105,7 @@ paths:
                   value:
                     ok: false
                     error: invalid_profile
-                    detail: Profile must be one of: low, medium, high.
+                    detail: "Profile must be one of: low, medium, high."
         '401':
           description: Missing or invalid API key (when enabled)
           content:
@@ -219,6 +219,92 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/jobs:
+    get:
+      summary: List compression jobs
+      description: >-
+        Returns paginated compression job summaries. Requires a valid
+        `X-API-Key` header when API key enforcement is enabled.
+      tags: [Jobs]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of jobs to return (1-100, defaults to 50).
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          description: Offset into the result set (defaults to 0).
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Jobs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobsListResponse'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Provided API key lacks access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/jobs/{job_id}:
+    get:
+      summary: Retrieve compression job details
+      description: Returns metadata for a specific job identifier.
+      tags: [Jobs]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job identifier (UUID string)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDetail'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Provided API key lacks access
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -269,3 +355,96 @@ components:
           type: string
         detail:
           type: string
+    JobStatus:
+      type: string
+      description: Lifecycle state of a compression job.
+      enum: [queued, running, completed, failed]
+    JobUser:
+      type: object
+      description: Minimal information about the user who requested the job.
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+      additionalProperties: false
+    JobSummary:
+      type: object
+      required:
+        - id
+        - status
+        - profile
+        - created_at
+        - original_bytes
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        profile:
+          type: string
+          description: Compression profile requested for the job.
+          enum: [low, medium, high]
+        created_at:
+          type: string
+          format: date-time
+        original_bytes:
+          type: integer
+          minimum: 0
+        compressed_bytes:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Present after compression completes.
+        ratio:
+          type: number
+          format: float
+          nullable: true
+          description: Compression ratio rounded to four decimals when available.
+        user:
+          $ref: '#/components/schemas/JobUser'
+          nullable: true
+      additionalProperties: false
+    JobDetail:
+      allOf:
+        - $ref: '#/components/schemas/JobSummary'
+        - type: object
+          properties:
+            updated_at:
+              type: string
+              format: date-time
+              nullable: true
+            completed_at:
+              type: string
+              format: date-time
+              nullable: true
+            original_filename:
+              type: string
+            preserve_images:
+              type: boolean
+            error_message:
+              type: string
+              nullable: true
+          additionalProperties: false
+    JobsListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobSummary'
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
+      additionalProperties: false
