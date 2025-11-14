@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, TypeVar
@@ -29,8 +30,12 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyReq
 from werkzeug.utils import secure_filename
 
 from pdfcompress.database import (
+    Base,
+    CompressionJob,
     DatabaseConfig,
+    JobStatus,
     SessionManager,
+    User,
     configure_session_factory,
     create_engine_from_config,
 )
@@ -144,6 +149,15 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         "APP_VERSION": os.environ.get("APP_VERSION", "1.0.0"),
         "BUILD_COMMIT": os.environ.get("APP_COMMIT"),
         "BUILD_TIME": os.environ.get("APP_BUILD_TIME"),
+        "DEFAULT_JOB_USER_EMAIL": os.environ.get(
+            "DEFAULT_JOB_USER_EMAIL", "anonymous@pdfcompress.local"
+        ),
+        "DEFAULT_JOB_USER_NAME": os.environ.get(
+            "DEFAULT_JOB_USER_NAME", "Anonymous User"
+        ),
+        "DEFAULT_JOB_USER_PASSWORD": os.environ.get(
+            "DEFAULT_JOB_USER_PASSWORD", "!anonymous!"
+        ),
     }
 
     for key, value in default_config.items():
@@ -296,6 +310,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 uploaded_file,
                 ghostscript_binary,
                 preset=COMPRESSION_PRESETS[profile],
+                profile=profile,
                 keep_images=keep_images,
             )
         except CompressionStorageError as error:
@@ -375,6 +390,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 uploaded_file,
                 ghostscript_binary,
                 preset=COMPRESSION_PRESETS[profile],
+                profile=profile,
                 keep_images=keep_images,
             )
         except CompressionStorageError as error:
@@ -514,8 +530,10 @@ def _configure_database(app: Flask) -> None:
 
     config = DatabaseConfig(url=database_url, echo=echo, connect_args=connect_args)
     engine = create_engine_from_config(config)
+    Base.metadata.create_all(engine)
     app.session_factory = configure_session_factory(engine)
     app.session_manager = SessionManager(app.session_factory)
+    _ensure_default_job_user(app)
 
 
 def get_session_manager() -> SessionManager:
@@ -616,6 +634,7 @@ def _compress_file(
     ghostscript_binary: str,
     *,
     preset: str,
+    profile: str,
     keep_images: bool,
 ) -> CompressionResult:
     """Persist the upload, invoke Ghostscript, and return compression metadata."""
@@ -625,9 +644,17 @@ def _compress_file(
     upload_path = Path(app.config["UPLOAD_FOLDER"]) / unique_input_name
     output_path = Path(app.config["COMPRESSED_FOLDER"]) / unique_output_name
 
+    job_id = _create_compression_job(
+        app,
+        original_filename=uploaded_file.filename or unique_input_name,
+        compression_level=profile,
+        preserve_images=keep_images,
+    )
+
     try:
         uploaded_file.save(upload_path)
     except OSError as error:
+        _mark_job_failed(app, job_id, upload_path, str(error))
         raise CompressionStorageError(str(error)) from error
 
     @after_this_request
@@ -649,21 +676,127 @@ def _compress_file(
         preserve_images=keep_images,
     )
 
-    subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        _mark_job_failed(app, job_id, upload_path, str(error))
+        raise
+    except subprocess.CalledProcessError as error:
+        error_message = error.stderr or str(error)
+        _mark_job_failed(app, job_id, upload_path, error_message)
+        raise
+    except Exception as error:
+        _mark_job_failed(app, job_id, upload_path, str(error))
+        raise
 
     download_name = _build_download_name(uploaded_file.filename)
+    original_bytes = _safe_file_size(upload_path)
+    compressed_bytes = _safe_file_size(output_path)
+    _mark_job_completed(
+        app,
+        job_id,
+        original_bytes=original_bytes,
+        compressed_bytes=compressed_bytes,
+    )
     return CompressionResult(
         output_path=output_path,
         download_name=download_name,
-        original_bytes=_safe_file_size(upload_path),
-        compressed_bytes=_safe_file_size(output_path),
+        original_bytes=original_bytes,
+        compressed_bytes=compressed_bytes,
         request_id=uuid.uuid4().hex,
     )
+
+
+def _create_compression_job(
+    app: Flask,
+    *,
+    original_filename: str,
+    compression_level: str,
+    preserve_images: bool,
+) -> str:
+    user_id = _default_job_user_id(app)
+    with app.session_manager as session:
+        job = CompressionJob(
+            user_id=user_id,
+            original_filename=original_filename,
+            original_size_bytes=0,
+            compressed_size_bytes=None,
+            compression_level=compression_level,
+            preserve_images=preserve_images,
+            status=JobStatus.RUNNING,
+        )
+        session.add(job)
+        session.flush()
+        return job.id
+
+
+def _mark_job_completed(
+    app: Flask,
+    job_id: str,
+    *,
+    original_bytes: int,
+    compressed_bytes: int,
+) -> None:
+    timestamp = datetime.now(timezone.utc)
+    with app.session_manager as session:
+        job = session.get(CompressionJob, job_id)
+        if job is None:
+            return
+        job.status = JobStatus.COMPLETED
+        job.original_size_bytes = original_bytes
+        job.compressed_size_bytes = compressed_bytes
+        job.completed_at = timestamp
+        job.error_message = None
+
+
+def _mark_job_failed(
+    app: Flask,
+    job_id: str,
+    upload_path: Path,
+    error_message: str | None,
+) -> None:
+    timestamp = datetime.now(timezone.utc)
+    original_bytes = _safe_file_size(upload_path)
+    with app.session_manager as session:
+        job = session.get(CompressionJob, job_id)
+        if job is None:
+            return
+        job.status = JobStatus.FAILED
+        job.original_size_bytes = original_bytes
+        job.compressed_size_bytes = 0
+        job.error_message = _truncate_error_message(error_message)
+        job.completed_at = timestamp
+
+
+def _default_job_user_id(app: Flask) -> str:
+    user_id = app.config.get("DEFAULT_JOB_USER_ID")
+    if user_id:
+        return str(user_id)
+    return _ensure_default_job_user(app)
+
+
+def _ensure_default_job_user(app: Flask) -> str:
+    email = app.config.get("DEFAULT_JOB_USER_EMAIL")
+    full_name = app.config.get("DEFAULT_JOB_USER_NAME", "Anonymous User")
+    hashed_password = app.config.get("DEFAULT_JOB_USER_PASSWORD", "!anonymous!")
+
+    with app.session_manager as session:
+        user = session.query(User).filter_by(email=email).first()
+        if user is None:
+            user = User(
+                email=email,
+                full_name=full_name,
+                hashed_password=hashed_password,
+            )
+            session.add(user)
+            session.flush()
+        app.config["DEFAULT_JOB_USER_ID"] = user.id
+        return user.id
 
 
 def _safe_file_size(path: Path) -> int:
@@ -671,6 +804,12 @@ def _safe_file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _truncate_error_message(message: str | None) -> str | None:
+    if not message:
+        return None
+    return message[:500]
 
 
 def _is_truthy_flag(value: str | None) -> bool:
