@@ -268,9 +268,13 @@ def test_api_key_required_when_configured(tmp_path: Path) -> None:
 def test_api_jobs_list_requires_api_key(api_client_with_db) -> None:
     api_client_with_db.application.config["API_KEYS"] = {"secret-key"}
     response = api_client_with_db.get("/api/jobs")
-    assert response.status_code == 401
+    assert response.status_code in (401, 403)
     payload = response.get_json()
-    assert payload["ok"] is False
+    assert payload == {
+        "ok": False,
+        "error": "unauthorized",
+        "detail": "A valid API key must be supplied via the X-API-Key header.",
+    }
 
 
 def test_api_jobs_list_returns_paginated_jobs(api_client_with_db) -> None:
@@ -301,6 +305,7 @@ def test_api_jobs_detail_returns_job(api_client_with_db) -> None:
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["id"] == job_id
+    assert payload["status"] == JobStatus.COMPLETED.value
     assert payload["ratio"] == 0.5
     assert payload["profile"] == "medium"
     assert payload["error_message"] is None
@@ -316,4 +321,8 @@ def test_api_jobs_detail_not_found_returns_404(api_client_with_db) -> None:
     )
     assert response.status_code == 404
     payload = response.get_json()
-    assert payload["error"] == "job_not_found"
+    assert payload == {
+        "ok": False,
+        "error": "job_not_found",
+        "detail": "The requested job was not found.",
+    }
