@@ -30,6 +30,7 @@ from werkzeug.utils import secure_filename
 
 from pdfcompress.database import (
     DatabaseConfig,
+    SessionManager,
     configure_session_factory,
     create_engine_from_config,
 )
@@ -514,6 +515,16 @@ def _configure_database(app: Flask) -> None:
     config = DatabaseConfig(url=database_url, echo=echo, connect_args=connect_args)
     engine = create_engine_from_config(config)
     app.session_factory = configure_session_factory(engine)
+    app.session_manager = SessionManager(app.session_factory)
+
+
+def get_session_manager() -> SessionManager:
+    """Return the SessionManager bound to the current Flask application."""
+
+    manager = getattr(current_app, "session_manager", None)
+    if manager is None:
+        raise RuntimeError("SessionManager has not been configured on this application.")
+    return manager
 
 
 def _coerce_int(value: str | int | None, default: int) -> int:
