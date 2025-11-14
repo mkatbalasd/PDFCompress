@@ -28,6 +28,7 @@ from flask import (
 from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
 from werkzeug.utils import secure_filename
+from sqlalchemy import func
 
 from pdfcompress.database import (
     Base,
@@ -471,6 +472,64 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             }
         )
 
+    @app.route("/api/jobs", methods=["GET"])
+    @require_api_key
+    def api_list_jobs() -> Response:
+        """Return paginated compression job records."""
+
+        try:
+            limit = _parse_pagination_param(
+                request.args.get("limit"),
+                name="limit",
+                default=50,
+                min_value=1,
+                max_value=100,
+            )
+            offset = _parse_pagination_param(
+                request.args.get("offset"),
+                name="offset",
+                default=0,
+                min_value=0,
+            )
+        except ValueError as error:
+            return _api_error_response(400, "invalid_pagination", str(error))
+
+        manager = get_session_manager()
+        with manager as session:
+            total = session.query(func.count(CompressionJob.id)).scalar() or 0
+            jobs = (
+                session.query(CompressionJob)
+                .order_by(CompressionJob.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            items = [_serialize_job_summary(job) for job in jobs]
+
+        return jsonify(
+            {
+                "items": items,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+
+    @app.route("/api/jobs/<string:job_id>", methods=["GET"])
+    @require_api_key
+    def api_get_job(job_id: str) -> Response:
+        """Return a single compression job."""
+
+        manager = get_session_manager()
+        with manager as session:
+            job = session.get(CompressionJob, job_id)
+            if job is None:
+                return _api_error_response(404, "job_not_found", "The requested job was not found.")
+            _ = job.user  # ensure relationship is loaded before session closes
+            payload = _serialize_job_detail(job)
+
+        return jsonify(payload)
+
     @app.route("/api/version", methods=["GET"])
     @require_api_key
     def api_version() -> Response:
@@ -626,6 +685,27 @@ def _is_pdf(uploaded_file: FileStorage) -> bool:
 
 def _has_allowed_extension(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _parse_pagination_param(
+    value: str | None,
+    *,
+    name: str,
+    default: int,
+    min_value: int,
+    max_value: int | None = None,
+) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer.")
+    if parsed < min_value:
+        raise ValueError(f"{name} must be >= {min_value}.")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"{name} must be <= {max_value}.")
+    return parsed
 
 
 def _compress_file(
@@ -810,6 +890,62 @@ def _truncate_error_message(message: str | None) -> str | None:
     if not message:
         return None
     return message[:500]
+
+
+def _format_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _serialize_job_user(job: CompressionJob) -> dict[str, Any] | None:
+    if not job.user_id:
+        return None
+    user_payload: dict[str, Any] = {"id": job.user_id}
+    user = getattr(job, "user", None)
+    if user is not None and getattr(user, "email", None):
+        user_payload["email"] = user.email
+    return user_payload
+
+
+def _calculate_ratio(job: CompressionJob) -> float | None:
+    if not job.original_size_bytes:
+        return None
+    if job.compressed_size_bytes is None:
+        return None
+    if job.original_size_bytes <= 0:
+        return None
+    ratio = job.compressed_size_bytes / job.original_size_bytes
+    return round(ratio, 4)
+
+
+def _serialize_job_summary(job: CompressionJob) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "status": job.status.value,
+        "profile": job.compression_level,
+        "created_at": _format_timestamp(job.created_at),
+        "original_bytes": job.original_size_bytes,
+        "compressed_bytes": job.compressed_size_bytes,
+        "user": _serialize_job_user(job),
+    }
+
+
+def _serialize_job_detail(job: CompressionJob) -> dict[str, Any]:
+    payload = _serialize_job_summary(job)
+    payload.update(
+        {
+            "updated_at": _format_timestamp(job.updated_at),
+            "completed_at": _format_timestamp(job.completed_at),
+            "ratio": _calculate_ratio(job),
+            "original_filename": job.original_filename,
+            "preserve_images": job.preserve_images,
+            "error_message": job.error_message,
+        }
+    )
+    return payload
 
 
 def _is_truthy_flag(value: str | None) -> bool:
