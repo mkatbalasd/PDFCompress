@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app import create_app, limiter
-from pdfcompress.database import Base, CompressionJob, JobStatus
+from pdfcompress.database import Base, CompressionJob, JobStatus, User
 
 
 @pytest.fixture()
@@ -98,6 +98,33 @@ def _fetch_all_jobs(app):
         return session.query(CompressionJob).all()
     finally:
         session.close()
+
+
+def _seed_jobs(app, count: int = 1) -> list[str]:
+    app.config.setdefault("API_KEYS", {"secret-key"})
+    job_ids: list[str] = []
+    with app.session_manager as session:
+        user = User(
+            email="seed@example.com",
+            full_name="Seed User",
+            hashed_password="seed",
+        )
+        session.add(user)
+        session.flush()
+        for index in range(count):
+            job = CompressionJob(
+                user_id=user.id,
+                original_filename=f"sample-{index}.pdf",
+                original_size_bytes=1000 + index,
+                compressed_size_bytes=500 + index,
+                compression_level="medium",
+                preserve_images=False,
+                status=JobStatus.COMPLETED,
+            )
+            session.add(job)
+            session.flush()
+            job_ids.append(job.id)
+    return job_ids
 
 
 def test_healthz_returns_status(api_client) -> None:
@@ -236,3 +263,57 @@ def test_api_key_required_when_configured(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.headers["Content-Type"].startswith("application/pdf")
+
+
+def test_api_jobs_list_requires_api_key(api_client_with_db) -> None:
+    api_client_with_db.application.config["API_KEYS"] = {"secret-key"}
+    response = api_client_with_db.get("/api/jobs")
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert payload["ok"] is False
+
+
+def test_api_jobs_list_returns_paginated_jobs(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    _seed_jobs(app, 3)
+    response = api_client_with_db.get(
+        "/api/jobs?limit=2&offset=1",
+        headers={"X-API-Key": "secret-key"},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["limit"] == 2
+    assert payload["offset"] == 1
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 2
+    assert all("id" in item for item in payload["items"])
+    assert payload["items"][0]["user"]["email"] == "seed@example.com"
+    assert set(payload["items"][0].keys()) >= {"id", "status", "profile", "created_at"}
+
+
+def test_api_jobs_detail_returns_job(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    job_id = _seed_jobs(app, 1)[0]
+    response = api_client_with_db.get(
+        f"/api/jobs/{job_id}",
+        headers={"X-API-Key": "secret-key"},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["id"] == job_id
+    assert payload["ratio"] == 0.5
+    assert payload["profile"] == "medium"
+    assert payload["error_message"] is None
+    assert payload["user"]["email"] == "seed@example.com"
+
+
+def test_api_jobs_detail_not_found_returns_404(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    app.config.setdefault("API_KEYS", {"secret-key"})
+    response = api_client_with_db.get(
+        "/api/jobs/does-not-exist",
+        headers={"X-API-Key": "secret-key"},
+    )
+    assert response.status_code == 404
+    payload = response.get_json()
+    assert payload["error"] == "job_not_found"
