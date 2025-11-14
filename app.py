@@ -28,6 +28,12 @@ from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
 from werkzeug.utils import secure_filename
 
+from pdfcompress.database import (
+    DatabaseConfig,
+    configure_session_factory,
+    create_engine_from_config,
+)
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 if TYPE_CHECKING:
@@ -172,6 +178,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
 
     limiter.init_app(app)
     _configure_logging(app)
+    _configure_database(app)
 
     @app.after_request
     def set_security_headers(response: Response) -> Response:
@@ -472,6 +479,43 @@ def _configure_logging(app: Flask) -> None:
     app.logger.setLevel(logging.INFO)
 
 
+def _configure_database(app: Flask) -> None:
+    """Initialise the SQLAlchemy engine and session factory."""
+
+    database_url = _first_not_none(
+        app.config.get("DATABASE_URL"),
+        os.environ.get("DATABASE_URL"),
+    )
+    if not database_url:
+        default_db_path = BASE_DIR / "app.db"
+        # Use a local SQLite database by default to keep development simple.
+        database_url = f"sqlite:///{default_db_path}"
+    app.config["DATABASE_URL"] = database_url
+
+    echo_setting = _first_not_none(
+        app.config.get("SQLALCHEMY_ECHO"),
+        os.environ.get("SQLALCHEMY_ECHO"),
+    )
+    debug_setting = _first_not_none(
+        app.config.get("APP_DEBUG"),
+        os.environ.get("APP_DEBUG"),
+    )
+    if echo_setting is not None:
+        echo = _coerce_bool(echo_setting)
+    elif debug_setting is not None:
+        echo = _coerce_bool(debug_setting)
+    else:
+        echo = False
+
+    connect_args: Dict[str, Any] | None = None
+    if database_url.startswith("sqlite"):
+        connect_args = {"check_same_thread": False}
+
+    config = DatabaseConfig(url=database_url, echo=echo, connect_args=connect_args)
+    engine = create_engine_from_config(config)
+    app.session_factory = configure_session_factory(engine)
+
+
 def _coerce_int(value: str | int | None, default: int) -> int:
     """Convert an environment string to an integer, falling back to a default."""
 
@@ -483,6 +527,25 @@ def _coerce_int(value: str | int | None, default: int) -> int:
         except ValueError:
             pass
     return default
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Convert config/environment values into booleans."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return False
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _api_error_response(status_code: int, error: str, detail: str) -> Response:
