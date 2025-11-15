@@ -515,16 +515,15 @@ def _configure_database(app: Flask) -> None:
     config = DatabaseConfig(url=database_url, echo=echo, connect_args=connect_args)
     engine = create_engine_from_config(config)
     app.session_factory = configure_session_factory(engine)
-    app.session_manager = SessionManager(app.session_factory)
 
 
 def get_session_manager() -> SessionManager:
-    """Return the SessionManager bound to the current Flask application."""
+    """Return a SessionManager bound to the current Flask application."""
 
-    manager = getattr(current_app, "session_manager", None)
-    if manager is None:
-        raise RuntimeError("SessionManager has not been configured on this application.")
-    return manager
+    session_factory = getattr(current_app, "session_factory", None)
+    if session_factory is None:
+        raise RuntimeError("Session factory has not been configured on this application.")
+    return SessionManager(session_factory)
 
 
 def _coerce_int(value: str | int | None, default: int) -> int:
