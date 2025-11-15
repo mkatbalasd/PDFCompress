@@ -106,9 +106,9 @@ Returns JSON with build metadata. The `version` field is always present; `commit
 
 ## API key authentication
 
-- Set the `API_KEYS` environment variable to a comma-separated list (for example, `API_KEYS=key1,key2`).
-- Include `X-API-Key` in each request when keys are enabled.
-- If the variable is unset, the API remains open without authentication.
+- Set the `API_KEYS` environment variable to comma-separated entries that bind a key to a display name and email, e.g. `API_KEYS='key1:Alice <alice@example.com>, key2:Bob <bob@example.com>'`.
+- Each API key automatically resolves to a `User` row (created on first use) and every job is stored against the matching user.
+- Include `X-API-Key` in each request when keys are enabled. Leave the variable unset to keep the API open.
 
 ## Configurable settings
 
@@ -118,7 +118,7 @@ Returns JSON with build metadata. The `version` field is always present; `commit
 | `RATELIMIT_STORAGE_URI` | Storage backend for rate limiting (defaults to in-memory; consider Redis in production). |
 | `GHOSTSCRIPT_COMMAND` | Path to the Ghostscript executable when it is not on `PATH`. |
 | `MAX_CONTENT_LENGTH` | Maximum upload size (100 MiB by default inside the container). |
-| `API_KEYS` | Whitelisted API keys for authentication. |
+| `API_KEYS` | Comma-separated `key:Name <email>` entries that control authentication and determine which `User` owns each API job. |
 
 ## Security and deployment tips
 

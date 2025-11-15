@@ -12,8 +12,23 @@ from sqlalchemy import create_engine
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import create_app, limiter
+from app import ApiKeyIdentity, create_app, limiter
 from pdfcompress.database import Base, CompressionJob, JobStatus, User
+from sqlalchemy.orm import joinedload
+
+
+API_KEY = "secret-key"
+API_USER_EMAIL = "api-user@example.com"
+API_USER_NAME = "API Test User"
+API_KEYS_CONFIG_STRING = f"{API_KEY}:{API_USER_NAME} <{API_USER_EMAIL}>"
+
+
+def _api_key_mapping() -> dict[str, ApiKeyIdentity]:
+    return {API_KEY: ApiKeyIdentity(email=API_USER_EMAIL, full_name=API_USER_NAME)}
+
+
+def _api_headers() -> dict[str, str]:
+    return {"X-API-Key": API_KEY}
 
 
 @pytest.fixture()
@@ -95,13 +110,16 @@ def _mock_subprocess_run(command, **_: object):
 def _fetch_all_jobs(app):
     session = app.session_factory()
     try:
-        return session.query(CompressionJob).all()
+        return (
+            session.query(CompressionJob)
+            .options(joinedload(CompressionJob.user))
+            .all()
+        )
     finally:
         session.close()
 
 
 def _seed_jobs(app, count: int = 1) -> list[str]:
-    app.config.setdefault("API_KEYS", {"secret-key"})
     job_ids: list[str] = []
     with app.session_manager as session:
         user = User(
@@ -211,6 +229,56 @@ def test_api_compress_creates_completed_job_record(api_client_with_db) -> None:
     assert job.compressed_size_bytes is not None and job.compressed_size_bytes > 0
 
 
+def test_api_compress_associates_job_with_api_user(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    app.config["API_KEYS"] = _api_key_mapping()
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 api user test")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "profile": "medium",
+    }
+
+    with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
+        response = api_client_with_db.post(
+            "/api/compress", data=data, headers=_api_headers()
+        )
+
+    assert response.status_code == 200
+    jobs = _fetch_all_jobs(app)
+    assert len(jobs) == 1
+    assert jobs[0].user.email == API_USER_EMAIL
+    assert jobs[0].user.full_name == API_USER_NAME
+
+
+def test_api_compress_reuses_user_for_same_api_key(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    app.config["API_KEYS"] = _api_key_mapping()
+    def build_payload() -> dict[str, tuple[io.BytesIO, str] | str]:
+        return {
+            "file": (io.BytesIO(b"%PDF-1.4 repeat"), "sample.pdf"),
+            "profile": "low",
+        }
+
+    with patch("app.subprocess.run", side_effect=_mock_subprocess_run):
+        response1 = api_client_with_db.post(
+            "/api/compress", data=build_payload(), headers=_api_headers()
+        )
+        response2 = api_client_with_db.post(
+            "/api/compress", data=build_payload(), headers=_api_headers()
+        )
+
+    assert response1.status_code == 200
+    assert response2.status_code == 200
+    session = app.session_factory()
+    try:
+        assert session.query(User).count() == 2  # seeded default + API user
+    finally:
+        session.close()
+    jobs = _fetch_all_jobs(app)
+    assert len(jobs) == 2
+    assert {job.user.email for job in jobs} == {API_USER_EMAIL}
+
+
 def test_api_compress_missing_file_creates_no_job(api_client_with_db) -> None:
     response = api_client_with_db.post("/api/compress")
 
@@ -230,7 +298,7 @@ def test_api_key_required_when_configured(tmp_path: Path) -> None:
             "COMPRESSED_FOLDER": str(tmp_path / "compressed"),
             "RATELIMIT_ENABLED": False,
             "RATELIMIT_STORAGE_URI": f"memory://?unique={uuid4().hex}",
-            "API_KEYS": {"secret-key"},
+            "API_KEYS": API_KEYS_CONFIG_STRING,
             "RATELIMIT_KEY_PREFIX": f"test-{uuid4().hex}",
         }
     )
@@ -258,7 +326,7 @@ def test_api_key_required_when_configured(tmp_path: Path) -> None:
             response = client.post(
                 "/api/compress",
                 data=build_payload(),
-                headers={"X-API-Key": "secret-key"},
+                headers=_api_headers(),
             )
 
     assert response.status_code == 200
@@ -266,7 +334,7 @@ def test_api_key_required_when_configured(tmp_path: Path) -> None:
 
 
 def test_api_jobs_list_requires_api_key(api_client_with_db) -> None:
-    api_client_with_db.application.config["API_KEYS"] = {"secret-key"}
+    api_client_with_db.application.config["API_KEYS"] = _api_key_mapping()
     response = api_client_with_db.get("/api/jobs")
     assert response.status_code in (401, 403)
     payload = response.get_json()
@@ -282,7 +350,7 @@ def test_api_jobs_list_returns_paginated_jobs(api_client_with_db) -> None:
     _seed_jobs(app, 3)
     response = api_client_with_db.get(
         "/api/jobs?limit=2&offset=1",
-        headers={"X-API-Key": "secret-key"},
+        headers=_api_headers(),
     )
     assert response.status_code == 200
     payload = response.get_json()
@@ -300,7 +368,7 @@ def test_api_jobs_detail_returns_job(api_client_with_db) -> None:
     job_id = _seed_jobs(app, 1)[0]
     response = api_client_with_db.get(
         f"/api/jobs/{job_id}",
-        headers={"X-API-Key": "secret-key"},
+        headers=_api_headers(),
     )
     assert response.status_code == 200
     payload = response.get_json()
@@ -314,10 +382,10 @@ def test_api_jobs_detail_returns_job(api_client_with_db) -> None:
 
 def test_api_jobs_detail_not_found_returns_404(api_client_with_db) -> None:
     app = api_client_with_db.application
-    app.config.setdefault("API_KEYS", {"secret-key"})
+    app.config.setdefault("API_KEYS", _api_key_mapping())
     response = api_client_with_db.get(
         "/api/jobs/does-not-exist",
-        headers={"X-API-Key": "secret-key"},
+        headers=_api_headers(),
     )
     assert response.status_code == 404
     payload = response.get_json()

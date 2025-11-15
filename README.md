@@ -49,9 +49,12 @@ specification covering `/healthz`, `/api/compress`, and `/api/version`.
 
 ### Authentication
 
-Set the `API_KEYS` environment variable (comma separated) to enforce API key
-checks on `/api` routes. When configured, clients must send `X-API-Key: <value>`
-with every request. Leave the variable unset to allow open access.
+Set the `API_KEYS` environment variable to comma-separated entries mapping each
+key to a user identity: `API_KEYS='key1:Alice <alice@example.com>, key2:Bob
+<bob@example.com>'`. Each API key automatically resolves to (and creates, if
+needed) a `User` record, and every `/api` job is stored against that user.
+Clients must continue to send `X-API-Key: <value>` with each request whenever
+keys are enabled. Leave the variable unset to allow open access.
 
 ### Rate limiting & limits
 

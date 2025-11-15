@@ -313,7 +313,8 @@ components:
       name: X-API-Key
       description: >-
         Optional API key enforcement. When the `API_KEYS` environment variable is
-        configured, requests must include a valid key.
+        configured with entries like `key:Name <email>`, requests must include a
+        matching key. Each key maps to a distinct logical user for job tracking.
   schemas:
     CompressionSuccess:
       type: object
