@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, TypeVar
 
 from flask import (
     Flask,
@@ -40,6 +40,7 @@ from pdfcompress.database import (
     configure_session_factory,
     create_engine_from_config,
 )
+from sqlalchemy.orm import Session
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -128,6 +129,17 @@ class CompressionStorageError(RuntimeError):
     """Raised when uploaded files cannot be persisted to disk."""
 
 
+@dataclass(frozen=True)
+class ApiKeyIdentity:
+    """Represents metadata embedded in API key configuration entries."""
+
+    email: str
+    full_name: str
+
+
+DEFAULT_API_USER_PASSWORD = "!api-key-auth!"
+
+
 def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     """Application factory used by tests and the production server."""
 
@@ -158,6 +170,9 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         ),
         "DEFAULT_JOB_USER_PASSWORD": os.environ.get(
             "DEFAULT_JOB_USER_PASSWORD", "!anonymous!"
+        ),
+        "API_USER_PLACEHOLDER_PASSWORD": os.environ.get(
+            "API_USER_PLACEHOLDER_PASSWORD", DEFAULT_API_USER_PASSWORD
         ),
     }
 
@@ -245,9 +260,9 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
 
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any):
-            configured_keys: set[str] = app.config.get("API_KEYS", set())
+            configured_keys: dict[str, ApiKeyIdentity] = app.config.get("API_KEYS", {})
             if configured_keys:
-                provided_key = request.headers.get("X-API-Key", "").strip()
+                provided_key = _get_request_api_key()
                 if provided_key not in configured_keys:
                     return _api_error_response(
                         401,
@@ -385,6 +400,14 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 "Ghostscript is not available on the server. Please install it and ensure it can be executed.",
             )
 
+        user_id: str | None = None
+        configured_keys: dict[str, ApiKeyIdentity] = app.config.get("API_KEYS", {})
+        if configured_keys:
+            api_key = _get_request_api_key()
+            with app.session_manager as session:
+                user = resolve_user_for_request(api_key, session)
+                user_id = user.id
+
         try:
             result = _compress_file(
                 app,
@@ -393,6 +416,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 preset=COMPRESSION_PRESETS[profile],
                 profile=profile,
                 keep_images=keep_images,
+                user_id=user_id,
             )
         except CompressionStorageError as error:
             app.logger.error("Failed to save uploaded file: %s", error)
@@ -642,15 +666,145 @@ def _api_error_response(status_code: int, error: str, detail: str) -> Response:
     return response
 
 
-def _parse_api_keys(value: Any) -> set[str]:
-    if not value:
-        return set()
-    if isinstance(value, str):
-        tokens = value.split(",")
+def _get_request_api_key() -> str:
+    """Return the API key supplied via headers, trimming whitespace."""
+
+    return request.headers.get("X-API-Key", "").strip()
+
+
+def resolve_user_for_request(api_key: str, session: Session) -> User:
+    """Ensure a :class:`User` exists for the provided API key and return it."""
+
+    mapping: Mapping[str, ApiKeyIdentity] = current_app.config.get("API_KEYS", {})
+    identity = mapping.get(api_key)
+    if identity is None:
+        raise ValueError("Unknown API key provided.")
+
+    user = session.query(User).filter_by(email=identity.email).first()
+    if user is not None:
+        return user
+
+    placeholder_password = current_app.config.get(
+        "API_USER_PLACEHOLDER_PASSWORD", DEFAULT_API_USER_PASSWORD
+    )
+    user = User(
+        email=identity.email,
+        full_name=identity.full_name,
+        hashed_password=placeholder_password,
+        is_active=True,
+    )
+    session.add(user)
+    session.flush()
+    return user
+
+
+def _parse_api_keys(value: Any) -> dict[str, ApiKeyIdentity]:
+    """Parse API key configuration into a mapping of key -> identity metadata.
+
+    Supported examples (comma-separated when provided via environment variables):
+        API_KEYS='key1:Alice <alice@example.com>, key2:Bob <bob@example.com>'
+    """
+
+    if value is None:
+        return {}
+
+    entries: list[tuple[str, Any]] = []
+    if isinstance(value, Mapping):
+        entries.extend((str(k).strip(), v) for k, v in value.items())
+    elif isinstance(value, str):
+        tokens = [token.strip() for token in value.split(",") if token.strip()]
+        entries.extend((token, None) for token in tokens)
+    elif isinstance(value, Iterable):
+        entries.extend((str(item).strip(), None) for item in value)
     else:
-        tokens = list(value)
-    parsed = {str(token).strip() for token in tokens if str(token).strip()}
+        entries.append((str(value).strip(), None))
+
+    parsed: dict[str, ApiKeyIdentity] = {}
+    for raw_key, raw_identity in entries:
+        if not raw_key:
+            continue
+        key, identity = _parse_api_key_entry(raw_key, raw_identity)
+        parsed[key] = identity
     return parsed
+
+
+def _parse_api_key_entry(key_token: str, raw_identity: Any) -> tuple[str, ApiKeyIdentity]:
+    key = key_token
+    identity_spec = raw_identity
+    if raw_identity is None and ":" in key_token:
+        prefix, suffix = key_token.split(":", 1)
+        key = prefix.strip()
+        identity_spec = suffix.strip()
+
+    if not key:
+        raise ValueError("API key entries must include a key component.")
+
+    identity = _coerce_api_key_identity(key, identity_spec)
+    return key, identity
+
+
+def _coerce_api_key_identity(key: str, spec: Any) -> ApiKeyIdentity:
+    if isinstance(spec, ApiKeyIdentity):
+        return spec
+    if isinstance(spec, Mapping):
+        email = str(spec.get("email") or spec.get("EMAIL") or "").strip()
+        full_name = str(
+            spec.get("full_name")
+            or spec.get("FULL_NAME")
+            or spec.get("name")
+            or spec.get("NAME")
+            or email
+        ).strip()
+        email = _normalize_api_email(key, email)
+        full_name = _normalize_api_name(email, full_name)
+        return ApiKeyIdentity(email=email, full_name=full_name)
+    if isinstance(spec, str) and spec:
+        email, full_name = _parse_identity_string(key, spec)
+        return ApiKeyIdentity(email=email, full_name=full_name)
+
+    email, full_name = _parse_identity_string(key, "")
+    return ApiKeyIdentity(email=email, full_name=full_name)
+
+
+def _parse_identity_string(key: str, value: str) -> tuple[str, str]:
+    normalized = value.strip()
+    email = ""
+    full_name = ""
+    if normalized:
+        if "<" in normalized and ">" in normalized:
+            start = normalized.index("<")
+            end = normalized.rfind(">")
+            potential_name = normalized[:start].strip()
+            potential_email = normalized[start + 1 : end].strip()
+            if potential_email:
+                email = potential_email
+            if potential_name:
+                full_name = potential_name
+        elif "@" in normalized:
+            email = normalized
+            full_name = normalized
+        else:
+            full_name = normalized
+    email = _normalize_api_email(key, email)
+    full_name = _normalize_api_name(email, full_name)
+    return email, full_name
+
+
+def _normalize_api_email(key: str, candidate: str) -> str:
+    email = candidate.strip().lower()
+    if email:
+        return email
+    sanitized_key = "".join(ch for ch in key if ch.isalnum() or ch in {"-", "_"}) or "user"
+    return f"{sanitized_key}@api.local"
+
+
+def _normalize_api_name(email: str, candidate: str) -> str:
+    name = candidate.strip()
+    if name:
+        return name
+    if email:
+        return email
+    return "API User"
 
 
 def _extract_file(files: Any) -> FileStorage | None:
@@ -716,6 +870,7 @@ def _compress_file(
     preset: str,
     profile: str,
     keep_images: bool,
+    user_id: str | None = None,
 ) -> CompressionResult:
     """Persist the upload, invoke Ghostscript, and return compression metadata."""
 
@@ -729,6 +884,7 @@ def _compress_file(
         original_filename=uploaded_file.filename or unique_input_name,
         compression_level=profile,
         preserve_images=keep_images,
+        user_id=user_id,
     )
 
     try:
@@ -798,11 +954,12 @@ def _create_compression_job(
     original_filename: str,
     compression_level: str,
     preserve_images: bool,
+    user_id: str | None = None,
 ) -> str:
-    user_id = _default_job_user_id(app)
+    resolved_user_id = user_id or _default_job_user_id(app)
     with app.session_manager as session:
         job = CompressionJob(
-            user_id=user_id,
+            user_id=resolved_user_id,
             original_filename=original_filename,
             original_size_bytes=0,
             compressed_size_bytes=None,
