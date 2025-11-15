@@ -467,11 +467,14 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
                 queue.enqueue(
                     "worker.run_compression_job",
                     job_id=job_id,
-                    upload_path_str=str(upload_path),
-                    output_path_str=str(output_path),
-                    preset=preset,
-                    profile=profile,
-                    keep_images=keep_images,
+                    kwargs={
+                        "job_id": job_id,
+                        "upload_path_str": str(upload_path),
+                        "output_path_str": str(output_path),
+                        "preset": preset,
+                        "profile": profile,
+                        "keep_images": keep_images,
+                    },
                 )
             except Exception as error:  # pragma: no cover - enqueue failure is rare
                 app.logger.error("Failed to enqueue compression job %s: %s", job_id, error)

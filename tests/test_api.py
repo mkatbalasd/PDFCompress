@@ -4,6 +4,7 @@ import io
 import sys
 from pathlib import Path
 from typing import Generator
+from unittest import mock
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from sqlalchemy import create_engine
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import ApiKeyIdentity, create_app, limiter
+from app import ApiKeyIdentity, COMPRESSION_PRESETS, create_app, limiter
 from pdfcompress.database import Base, CompressionJob, JobStatus, User
 from sqlalchemy.orm import joinedload
 
@@ -275,7 +276,16 @@ def test_api_compress_async_mode_enqueues_job(api_client_with_db) -> None:
     assert payload["status"] == JobStatus.QUEUED.value
     assert payload["job_id"]
     queue_mock.enqueue.assert_called_once()
-    assert queue_mock.enqueue.call_args.kwargs["job_id"] == payload["job_id"]
+    enqueue_kwargs = queue_mock.enqueue.call_args.kwargs
+    assert enqueue_kwargs["job_id"] == payload["job_id"]
+    assert enqueue_kwargs["kwargs"] == {
+        "job_id": payload["job_id"],
+        "upload_path_str": mock.ANY,
+        "output_path_str": mock.ANY,
+        "preset": COMPRESSION_PRESETS["high"],
+        "profile": "high",
+        "keep_images": False,
+    }
 
     jobs = _fetch_all_jobs(app)
     assert len(jobs) == 1
