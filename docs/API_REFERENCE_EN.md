@@ -53,6 +53,24 @@ Returns JSON describing the service status, detected Ghostscript binary, and app
 }
 ```
 
+### Async mode (optional)
+
+- Add `?mode=async` to the request URL or send `X-Compress-Mode: async` to enqueue the job.
+- The server responds with `202 Accepted` and metadata similar to:
+
+  ```json
+  {
+    "ok": true,
+    "mode": "async",
+    "job_id": "5e6f7a8b-1234-5678-9abc-d0ef12345678",
+    "status": "queued",
+    "request_id": "6b1c2d3e4f50617273747576"
+  }
+  ```
+
+- Poll `GET /api/jobs/{job_id}` (with the same API key) to check whether the job is running, completed, or failed.
+- If the queue is disabled or unavailable, the API returns `503` with `error=background_queue_unavailable`.
+
 ### `curl` examples
 
 #### Download the compressed file (default)

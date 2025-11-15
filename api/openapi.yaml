@@ -44,6 +44,15 @@ paths:
       tags: [Compression]
       security:
         - ApiKeyAuth: []
+      parameters:
+        - in: query
+          name: mode
+          schema:
+            type: string
+            enum: [async, sync]
+          description: >-
+            Optional processing mode. Set to `async` (or send `X-Compress-Mode: async`)
+            to enqueue the job and receive `202 Accepted` with job metadata.
       requestBody:
         required: true
         content:
@@ -145,6 +154,37 @@ paths:
                     ok: false
                     error: unsupported_media_type
                     detail: Only PDF documents are supported for compression.
+        '202':
+          description: Job accepted for asynchronous processing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, mode, job_id, status, request_id]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  mode:
+                    type: string
+                    enum: [async]
+                  job_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: queued
+                  request_id:
+                    type: string
+              examples:
+                queued:
+                  summary: Job enqueued
+                  value:
+                    ok: true
+                    mode: async
+                    job_id: 7c558e0a-25a9-4b44-b5d6-8b2f4d1a1234
+                    status: queued
+                    request_id: 29c1a6cbbab54cebb9f12d559ef4bf31
         '429':
           description: Rate limit exceeded
           content:

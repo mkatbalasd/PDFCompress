@@ -12,7 +12,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    Sequence,
+    TypeVar,
+)
 
 from flask import (
     Flask,
@@ -29,6 +38,8 @@ from werkzeug.datastructures import FileStorage
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge, TooManyRequests
 from werkzeug.utils import secure_filename
 from sqlalchemy import func
+from redis import Redis
+from rq import Queue
 
 from pdfcompress.database import (
     Base,
@@ -174,6 +185,13 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
         "API_USER_PLACEHOLDER_PASSWORD": os.environ.get(
             "API_USER_PLACEHOLDER_PASSWORD", DEFAULT_API_USER_PASSWORD
         ),
+        "REDIS_URL": os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+        "USE_BACKGROUND_QUEUE": _coerce_bool(
+            os.environ.get("USE_BACKGROUND_QUEUE", "false")
+        ),
+        "COMPRESSION_QUEUE_NAME": os.environ.get(
+            "COMPRESSION_QUEUE_NAME", "pdfcompress"
+        ),
     }
 
     for key, value in default_config.items():
@@ -210,6 +228,7 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
     limiter.init_app(app)
     _configure_logging(app)
     _configure_database(app)
+    _configure_background_queue(app)
 
     @app.after_request
     def set_security_headers(response: Response) -> Response:
@@ -407,6 +426,75 @@ def create_app(test_config: Dict[str, Any] | None = None) -> Flask:
             with app.session_manager as session:
                 user = resolve_user_for_request(api_key, session)
                 user_id = user.id
+
+        async_requested = _async_mode_requested()
+        queue: Queue | None = getattr(app, "compression_queue", None)
+        use_background = _coerce_bool(app.config.get("USE_BACKGROUND_QUEUE"))
+
+        if async_requested:
+            if not (use_background and queue is not None):
+                return _api_error_response(
+                    503,
+                    "background_queue_unavailable",
+                    "The background queue is unavailable. Please try again later.",
+                )
+
+            job_id = _create_compression_job(
+                app,
+                original_filename=uploaded_file.filename or "upload.pdf",
+                compression_level=profile,
+                preserve_images=keep_images,
+                user_id=user_id,
+                status=JobStatus.QUEUED,
+            )
+            unique_input_name = f"{uuid.uuid4().hex}.pdf"
+            unique_output_name = f"{uuid.uuid4().hex}.pdf"
+            upload_path = Path(app.config["UPLOAD_FOLDER"]) / unique_input_name
+            output_path = Path(app.config["COMPRESSED_FOLDER"]) / unique_output_name
+            preset = COMPRESSION_PRESETS[profile]
+
+            try:
+                _save_upload_file(uploaded_file, upload_path, app, job_id)
+            except CompressionStorageError as error:
+                app.logger.error("Failed to save uploaded file: %s", error)
+                return _api_error_response(
+                    500,
+                    "storage_error",
+                    "Failed to save the uploaded file.",
+                )
+
+            try:
+                queue.enqueue(
+                    "worker.run_compression_job",
+                    job_id=job_id,
+                    upload_path_str=str(upload_path),
+                    output_path_str=str(output_path),
+                    preset=preset,
+                    profile=profile,
+                    keep_images=keep_images,
+                )
+            except Exception as error:  # pragma: no cover - enqueue failure is rare
+                app.logger.error("Failed to enqueue compression job %s: %s", job_id, error)
+                _mark_job_failed(app, job_id, upload_path, str(error))
+                upload_path.unlink(missing_ok=True)
+                output_path.unlink(missing_ok=True)
+                return _api_error_response(
+                    503,
+                    "background_queue_unavailable",
+                    "The background queue is unavailable. Please try again later.",
+                )
+
+            response = jsonify(
+                {
+                    "ok": True,
+                    "mode": "async",
+                    "job_id": job_id,
+                    "status": JobStatus.QUEUED.value,
+                    "request_id": uuid.uuid4().hex,
+                }
+            )
+            response.status_code = 202
+            return response
 
         try:
             result = _compress_file(
@@ -617,6 +705,35 @@ def _configure_database(app: Flask) -> None:
     app.session_factory = configure_session_factory(engine)
     app.session_manager = SessionManager(app.session_factory)
     _ensure_default_job_user(app)
+
+
+def _configure_background_queue(app: Flask) -> None:
+    """Initialize Redis/RQ queue bindings based on configuration."""
+
+    setattr(app, "redis", None)
+    setattr(app, "compression_queue", None)
+
+    use_background = _coerce_bool(app.config.get("USE_BACKGROUND_QUEUE"))
+    if not use_background:
+        return
+
+    redis_url = app.config.get("REDIS_URL")
+    queue_name = app.config.get("COMPRESSION_QUEUE_NAME", "pdfcompress")
+    if not redis_url:
+        app.logger.warning(
+            "USE_BACKGROUND_QUEUE is enabled but REDIS_URL is missing."
+        )
+        return
+
+    try:
+        redis_client = Redis.from_url(redis_url)
+        queue = Queue(queue_name, connection=redis_client)
+    except Exception as error:  # pragma: no cover - defensive logging
+        app.logger.error("Failed to configure Redis queue: %s", error)
+        return
+
+    app.redis = redis_client
+    app.compression_queue = queue
 
 
 def get_session_manager() -> SessionManager:
@@ -887,11 +1004,7 @@ def _compress_file(
         user_id=user_id,
     )
 
-    try:
-        uploaded_file.save(upload_path)
-    except OSError as error:
-        _mark_job_failed(app, job_id, upload_path, str(error))
-        raise CompressionStorageError(str(error)) from error
+    _save_upload_file(uploaded_file, upload_path, app, job_id)
 
     @after_this_request
     def cleanup(response: Response) -> Response:
@@ -912,9 +1025,53 @@ def _compress_file(
         preserve_images=keep_images,
     )
 
+    original_bytes, compressed_bytes = _run_ghostscript_for_job(
+        app,
+        job_id,
+        upload_path,
+        output_path,
+        command,
+    )
+
+    download_name = _build_download_name(uploaded_file.filename)
+    return CompressionResult(
+        output_path=output_path,
+        download_name=download_name,
+        original_bytes=original_bytes,
+        compressed_bytes=compressed_bytes,
+        request_id=uuid.uuid4().hex,
+    )
+
+
+def _save_upload_file(
+    uploaded_file: FileStorage, upload_path: Path, app: Flask, job_id: str
+) -> None:
+    """Persist the uploaded file and propagate a storage error if needed."""
+
+    try:
+        uploaded_file.save(upload_path)
+    except OSError as error:
+        _mark_job_failed(app, job_id, upload_path, str(error))
+        raise CompressionStorageError(str(error)) from error
+
+
+def _run_ghostscript_for_job(
+    app: Flask,
+    job_id: str,
+    upload_path: Path,
+    output_path: Path,
+    command: Sequence[str],
+    *,
+    mark_running: bool = False,
+) -> tuple[int, int]:
+    """Execute Ghostscript and update the job record accordingly."""
+
+    if mark_running:
+        _mark_job_running(app, job_id)
+
     try:
         subprocess.run(
-            command,
+            list(command),
             check=True,
             capture_output=True,
             text=True,
@@ -926,11 +1083,10 @@ def _compress_file(
         error_message = error.stderr or str(error)
         _mark_job_failed(app, job_id, upload_path, error_message)
         raise
-    except Exception as error:
+    except Exception as error:  # pragma: no cover - defensive
         _mark_job_failed(app, job_id, upload_path, str(error))
         raise
 
-    download_name = _build_download_name(uploaded_file.filename)
     original_bytes = _safe_file_size(upload_path)
     compressed_bytes = _safe_file_size(output_path)
     _mark_job_completed(
@@ -939,13 +1095,7 @@ def _compress_file(
         original_bytes=original_bytes,
         compressed_bytes=compressed_bytes,
     )
-    return CompressionResult(
-        output_path=output_path,
-        download_name=download_name,
-        original_bytes=original_bytes,
-        compressed_bytes=compressed_bytes,
-        request_id=uuid.uuid4().hex,
-    )
+    return original_bytes, compressed_bytes
 
 
 def _create_compression_job(
@@ -955,6 +1105,7 @@ def _create_compression_job(
     compression_level: str,
     preserve_images: bool,
     user_id: str | None = None,
+    status: JobStatus = JobStatus.RUNNING,
 ) -> str:
     resolved_user_id = user_id or _default_job_user_id(app)
     with app.session_manager as session:
@@ -965,11 +1116,21 @@ def _create_compression_job(
             compressed_size_bytes=None,
             compression_level=compression_level,
             preserve_images=preserve_images,
-            status=JobStatus.RUNNING,
+            status=status,
         )
         session.add(job)
         session.flush()
         return job.id
+
+
+def _mark_job_running(app: Flask, job_id: str) -> None:
+    with app.session_manager as session:
+        job = session.get(CompressionJob, job_id)
+        if job is None:
+            return
+        job.status = JobStatus.RUNNING
+        job.error_message = None
+        job.completed_at = None
 
 
 def _mark_job_completed(
@@ -1113,6 +1274,15 @@ def _is_truthy_flag(value: str | None) -> bool:
 
     normalized = value.strip().lower()
     return normalized in {"1", "true", "yes", "on"}
+
+
+def _async_mode_requested() -> bool:
+    """Return True when the request explicitly opts into async processing."""
+
+    candidate = request.args.get("mode") or request.headers.get("X-Compress-Mode")
+    if not candidate:
+        return False
+    return candidate.strip().lower() == "async"
 
 
 def _build_download_name(original_filename: str | None) -> str:
