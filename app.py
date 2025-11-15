@@ -532,17 +532,25 @@ def _configure_database(app: Flask) -> None:
     engine = create_engine_from_config(config)
     Base.metadata.create_all(engine)
     app.session_factory = configure_session_factory(engine)
-    app.session_manager = SessionManager(app.session_factory)
     _ensure_default_job_user(app)
 
 
 def get_session_manager() -> SessionManager:
     """Return the SessionManager bound to the current Flask application."""
 
-    manager = getattr(current_app, "session_manager", None)
-    if manager is None:
-        raise RuntimeError("SessionManager has not been configured on this application.")
-    return manager
+    factory = getattr(current_app, "session_factory", None)
+    if factory is None:
+        raise RuntimeError("Session factory has not been configured on this application.")
+    return SessionManager(factory)
+
+
+def _session_scope(app: Flask) -> SessionManager:
+    """Return a new SessionManager instance bound to *app*."""
+
+    factory = getattr(app, "session_factory", None)
+    if factory is None:
+        raise RuntimeError("Session factory has not been configured on this application.")
+    return SessionManager(factory)
 
 
 def _coerce_int(value: str | int | None, default: int) -> int:
@@ -720,7 +728,7 @@ def _create_compression_job(
     preserve_images: bool,
 ) -> str:
     user_id = _default_job_user_id(app)
-    with app.session_manager as session:
+    with _session_scope(app) as session:
         job = CompressionJob(
             user_id=user_id,
             original_filename=original_filename,
@@ -743,7 +751,7 @@ def _mark_job_completed(
     compressed_bytes: int,
 ) -> None:
     timestamp = datetime.now(timezone.utc)
-    with app.session_manager as session:
+    with _session_scope(app) as session:
         job = session.get(CompressionJob, job_id)
         if job is None:
             return
@@ -762,7 +770,7 @@ def _mark_job_failed(
 ) -> None:
     timestamp = datetime.now(timezone.utc)
     original_bytes = _safe_file_size(upload_path)
-    with app.session_manager as session:
+    with _session_scope(app) as session:
         job = session.get(CompressionJob, job_id)
         if job is None:
             return
@@ -785,7 +793,7 @@ def _ensure_default_job_user(app: Flask) -> str:
     full_name = app.config.get("DEFAULT_JOB_USER_NAME", "Anonymous User")
     hashed_password = app.config.get("DEFAULT_JOB_USER_PASSWORD", "!anonymous!")
 
-    with app.session_manager as session:
+    with _session_scope(app) as session:
         user = session.query(User).filter_by(email=email).first()
         if user is None:
             user = User(
