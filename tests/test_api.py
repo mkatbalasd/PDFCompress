@@ -4,7 +4,7 @@ import io
 import sys
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -248,6 +248,71 @@ def test_api_compress_associates_job_with_api_user(api_client_with_db) -> None:
     assert len(jobs) == 1
     assert jobs[0].user.email == API_USER_EMAIL
     assert jobs[0].user.full_name == API_USER_NAME
+
+
+def test_api_compress_async_mode_enqueues_job(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    app.config["API_KEYS"] = _api_key_mapping()
+    app.config["USE_BACKGROUND_QUEUE"] = True
+    queue_mock = Mock()
+    app.compression_queue = queue_mock
+
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 async queue")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "profile": "high",
+    }
+
+    response = api_client_with_db.post(
+        "/api/compress?mode=async",
+        data=data,
+        headers=_api_headers(),
+    )
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    assert payload["mode"] == "async"
+    assert payload["status"] == JobStatus.QUEUED.value
+    assert payload["job_id"]
+    queue_mock.enqueue.assert_called_once()
+    assert queue_mock.enqueue.call_args.kwargs["job_id"] == payload["job_id"]
+
+    jobs = _fetch_all_jobs(app)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.id == payload["job_id"]
+    assert job.status is JobStatus.QUEUED
+    assert job.user.email == API_USER_EMAIL
+
+
+def test_api_compress_async_mode_without_queue_returns_error(api_client_with_db) -> None:
+    app = api_client_with_db.application
+    app.config["API_KEYS"] = _api_key_mapping()
+    app.config["USE_BACKGROUND_QUEUE"] = False
+    app.compression_queue = None
+
+    pdf_bytes = io.BytesIO(b"%PDF-1.4 async unavailable")
+    data = {
+        "file": (pdf_bytes, "sample.pdf"),
+        "profile": "low",
+    }
+
+    response = api_client_with_db.post(
+        "/api/compress?mode=async",
+        data=data,
+        headers=_api_headers(),
+    )
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload == {
+        "ok": False,
+        "error": "background_queue_unavailable",
+        "detail": "The background queue is unavailable. Please try again later.",
+    }
+
+    jobs = _fetch_all_jobs(app)
+    assert len(jobs) == 0
 
 
 def test_api_compress_reuses_user_for_same_api_key(api_client_with_db) -> None:
